@@ -83,6 +83,20 @@ digraph brainstorming {
 - Use elements-of-style:writing-clearly-and-concisely skill if available
 - Commit the design document to git
 
+**Spec Review Loop:**
+After writing the spec document:
+1. Dispatch spec-document-reviewer subagent (see spec-document-reviewer-prompt.md)
+2. If ❌ Issues Found:
+   - Fix the issues in the spec document
+   - Re-dispatch reviewer
+   - Repeat until ✅ Approved
+3. If ✅ Approved: proceed to implementation setup
+
+**Review loop guidance:**
+- Same agent that wrote the spec fixes it (preserves context)
+- If loop exceeds 5 iterations, surface to human for guidance
+- Reviewers are advisory - explain disagreements if you believe feedback is incorrect
+
 **Implementation:**
 - Invoke the writing-plans skill to create a detailed implementation plan
 - Do NOT invoke any other skill. writing-plans is the next step.

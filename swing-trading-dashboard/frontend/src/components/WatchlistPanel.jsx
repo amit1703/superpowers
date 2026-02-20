@@ -30,6 +30,7 @@ export default function WatchlistPanel({ items, selectedTicker, onSelectTicker, 
           {items.map((item) => {
             const isSelected = selectedTicker === item.ticker
             const isTdl = item.pattern_type === 'TDL'
+            const hasRsBlueDot = item.rs_blue_dot === true
             return (
               <div
                 key={item.ticker}
@@ -44,11 +45,16 @@ export default function WatchlistPanel({ items, selectedTicker, onSelectTicker, 
                 onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.03)'}
                 onMouseLeave={e => e.currentTarget.style.background = isSelected ? 'rgba(245,166,35,0.06)' : 'transparent'}
               >
-                {/* Ticker */}
-                <span className="font-600 text-[10px] tracking-wide"
-                      style={{ color: isSelected ? 'var(--accent)' : 'var(--text)' }}>
-                  {item.ticker}
-                </span>
+                {/* Ticker with RS Blue Dot indicator */}
+                <div className="flex items-center gap-1">
+                  <span className="font-600 text-[10px] tracking-wide"
+                        style={{ color: isSelected ? 'var(--accent)' : 'var(--text)' }}>
+                    {item.ticker}
+                  </span>
+                  {hasRsBlueDot && (
+                    <span style={{ color: '#00C8FF', fontSize: '8px' }}>⭐</span>
+                  )}
+                </div>
 
                 <div className="flex items-center gap-1">
                   {/* Distance */}

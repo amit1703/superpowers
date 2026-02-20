@@ -58,10 +58,13 @@ export default function SetupTable({ title, accentColor, setups, selectedTicker,
             </thead>
             <tbody>
               {setups.map((s) => {
-                const isSelected  = selectedTicker === s.ticker
-                const isVolSurge  = s.is_vol_surge === true
-                const isBrk       = s.is_breakout === true
-                const isRsPlus    = typeof s.rs_vs_spy === 'number' && s.rs_vs_spy > 0
+                const isSelected        = selectedTicker === s.ticker
+                const isVolSurge        = s.is_vol_surge === true
+                const isBrk             = s.is_breakout === true
+                const isRsPlus          = typeof s.rs_vs_spy === 'number' && s.rs_vs_spy > 0
+                const isTrendlineBreakout = s.is_trendline_breakout === true
+                const isKdeBreakout     = s.is_kde_breakout === true
+                const isRelaxed         = s.is_relaxed === true
 
                 // Row background: green tint for volume-surge rows
                 const rowStyle = isVolSurge
@@ -103,16 +106,28 @@ export default function SetupTable({ title, accentColor, setups, selectedTicker,
                     <td style={{ textAlign: 'left' }}>
                       {s.setup_type === 'VCP' ? (
                         <div className="flex items-center gap-1 flex-wrap">
-                          {/* BRK / DRY badge */}
-                          <span
-                            className="badge"
-                            style={isBrk
-                              ? { background: 'rgba(0,200,122,0.18)', color: 'var(--go)', border: '1px solid rgba(0,200,122,0.4)', fontWeight: 700 }
-                              : { background: 'rgba(245,166,35,0.12)', color: 'var(--accent)', border: '1px solid rgba(245,166,35,0.3)' }
-                            }
-                          >
-                            {isBrk ? 'BRK' : 'DRY'}
-                          </span>
+                          {/* KDE badge — only if KDE breakout */}
+                          {isKdeBreakout && (
+                            <span
+                              className="badge"
+                              style={{ background: 'rgba(0,200,255,0.10)', color: '#00C8FF', border: '1px solid rgba(0,200,255,0.3)', fontWeight: 700 }}
+                            >
+                              KDE
+                            </span>
+                          )}
+
+                          {/* BRK / DRY badge — only if NOT KDE breakout */}
+                          {!isKdeBreakout && (
+                            <span
+                              className="badge"
+                              style={isBrk
+                                ? { background: 'rgba(0,200,122,0.18)', color: 'var(--go)', border: '1px solid rgba(0,200,122,0.4)', fontWeight: 700 }
+                                : { background: 'rgba(245,166,35,0.12)', color: 'var(--accent)', border: '1px solid rgba(245,166,35,0.3)' }
+                              }
+                            >
+                              {isBrk ? 'BRK' : 'DRY'}
+                            </span>
+                          )}
 
                           {/* Volume ratio — shown for all VCP */}
                           {s.volume_ratio != null && (
@@ -133,12 +148,32 @@ export default function SetupTable({ title, accentColor, setups, selectedTicker,
                               RS+
                             </span>
                           )}
+
+                          {/* TDL badge — trendline breakout */}
+                          {isTrendlineBreakout && (
+                            <span
+                              className="badge"
+                              style={{ background: 'rgba(255,255,255,0.08)', color: '#FFFFFF', border: '1px solid rgba(255,255,255,0.25)', fontSize: 8 }}
+                            >
+                              TDL
+                            </span>
+                          )}
                         </div>
                       ) : (
-                        /* Pullback: show CCI value */
-                        <span className="text-t-muted text-[9px]">
-                          CCI {s.cci_today?.toFixed(0) ?? '—'}
-                        </span>
+                        /* Pullback: show CCI value + RLX badge */
+                        <div className="flex items-center gap-1">
+                          <span className="text-t-muted text-[9px]">
+                            CCI {s.cci_today?.toFixed(0) ?? '—'}
+                          </span>
+                          {isRelaxed && (
+                            <span
+                              className="badge"
+                              style={{ background: 'rgba(245,166,35,0.12)', color: 'var(--accent)', border: '1px solid rgba(245,166,35,0.3)', fontSize: 7 }}
+                            >
+                              RLX
+                            </span>
+                          )}
+                        </div>
                       )}
                     </td>
                   </tr>

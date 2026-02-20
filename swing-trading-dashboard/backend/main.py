@@ -60,7 +60,7 @@ from database import (
 from engines.engine0 import check_market_regime
 from engines.engine1 import calculate_sr_zones
 from engines.engine2 import scan_vcp, detect_trendline, scan_near_breakout
-from engines.engine3 import scan_pullback
+from engines.engine3 import scan_pullback, scan_relaxed_pullback
 from tickers import SCAN_UNIVERSE
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -253,12 +253,21 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                         await save_setup(DB_PATH, scan_ts, near)
                         log.info("  NEAR     %-6s  dist=%.1f%%", ticker, near["distance_pct"])
 
-                # Engine 3: Tactical pullback
+                # Engine 3: Tactical pullback (strict, then relaxed)
                 pb = await loop.run_in_executor(None, scan_pullback, ticker, df, zones)
                 if pb:
                     await save_setup(DB_PATH, scan_ts, pb)
                     pb_count += 1
                     log.info("  PULLBACK %-6s  entry=%.2f", ticker, pb["entry"])
+                else:
+                    # Only check relaxed if no strict pullback found
+                    pb_relaxed = await loop.run_in_executor(
+                        None, scan_relaxed_pullback, ticker, df, zones
+                    )
+                    if pb_relaxed:
+                        await save_setup(DB_PATH, scan_ts, pb_relaxed)
+                        pb_count += 1
+                        log.info("  PULLBACK %-6s  entry=%.2f (relaxed)", ticker, pb_relaxed["entry"])
 
             except Exception as exc:
                 log.error("Error processing %s: %s", ticker, exc)

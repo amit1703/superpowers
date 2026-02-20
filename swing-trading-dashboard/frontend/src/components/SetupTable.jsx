@@ -65,6 +65,7 @@ export default function SetupTable({ title, accentColor, setups, selectedTicker,
                 const isTrendlineBreakout = s.is_trendline_breakout === true
                 const isKdeBreakout     = s.is_kde_breakout === true
                 const isRelaxed         = s.is_relaxed === true
+                const isRsLead          = s.is_rs_lead === true
 
                 // Row background: green tint for volume-surge rows
                 const rowStyle = isVolSurge
@@ -106,8 +107,18 @@ export default function SetupTable({ title, accentColor, setups, selectedTicker,
                     <td style={{ textAlign: 'left' }}>
                       {s.setup_type === 'VCP' ? (
                         <div className="flex items-center gap-1 flex-wrap">
-                          {/* KDE badge — only if KDE breakout */}
-                          {isKdeBreakout && (
+                          {/* LEAD badge — RS LEAD setups (cyan, priority) */}
+                          {isRsLead && (
+                            <span
+                              className="badge"
+                              style={{ background: 'rgba(0,200,255,0.10)', color: '#00C8FF', border: '1px solid rgba(0,200,255,0.3)', fontWeight: 700 }}
+                            >
+                              LEAD
+                            </span>
+                          )}
+
+                          {/* KDE badge — only if NOT RS LEAD */}
+                          {!isRsLead && isKdeBreakout && (
                             <span
                               className="badge"
                               style={{ background: 'rgba(0,200,255,0.10)', color: '#00C8FF', border: '1px solid rgba(0,200,255,0.3)', fontWeight: 700 }}
@@ -116,8 +127,8 @@ export default function SetupTable({ title, accentColor, setups, selectedTicker,
                             </span>
                           )}
 
-                          {/* BRK / DRY badge — only if NOT KDE breakout */}
-                          {!isKdeBreakout && (
+                          {/* BRK / DRY badge — only if NOT RS LEAD and NOT KDE breakout */}
+                          {!isRsLead && !isKdeBreakout && (
                             <span
                               className="badge"
                               style={isBrk

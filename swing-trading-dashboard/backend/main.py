@@ -28,6 +28,7 @@ Run
 """
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -78,6 +79,20 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("swing")
+
+# ────────────────────────────────────────────────────────────────────────────
+# Sector mapping
+# ────────────────────────────────────────────────────────────────────────────
+
+SECTORS_FILE = "sectors.json"
+SECTORS = {}
+
+try:
+    with open(SECTORS_FILE, 'r') as f:
+        SECTORS = json.load(f)
+    log.info("Loaded %d sectors from %s", len(SECTORS), SECTORS_FILE)
+except Exception as e:
+    log.warning("Could not load sectors.json: %s", e)
 
 # ────────────────────────────────────────────────────────────────────────────
 # Shared state (single-process; safe with asyncio event loop)
@@ -218,6 +233,15 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
         except Exception as exc:
             log.warning("Could not compute SPY 3m return: %s", exc)
 
+        # ── SPY full data (for RS Line calculations) ─────────────────────
+        spy_df_full = None
+        try:
+            spy_df_full = await _fetch("SPY")
+            if spy_df_full is not None and len(spy_df_full) >= 252:
+                log.info("SPY data fetched: %d days for RS Line", len(spy_df_full))
+        except Exception as exc:
+            log.warning("Could not fetch full SPY data for RS: %s", exc)
+
         # ── Per-ticker processing ─────────────────────────────────────────
         vcp_count = 0
         pb_count = 0
@@ -230,6 +254,23 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                 if df is None or len(df) < 60:
                     return
 
+                # ── RS Line Calculation ────────────────────────────────────
+                rs_line = None
+                rs_ratio = 0.0
+                rs_52w_high = 0.0
+                rs_blue_dot = False
+
+                if spy_df_full is not None:
+                    rs_line = await loop.run_in_executor(
+                        None, calculate_rs_line, df, spy_df_full
+                    )
+                    if rs_line and len(rs_line) >= 252:
+                        rs_ratio = float(rs_line[-1])
+                        rs_52w_high = float(max(rs_line))
+                        rs_blue_dot = await loop.run_in_executor(
+                            None, detect_rs_blue_dot, rs_line
+                        )
+
                 # Engine 1: S/R zones
                 zones: List[Dict] = await loop.run_in_executor(
                     None, calculate_sr_zones, ticker, df
@@ -237,34 +278,20 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                 if zones:
                     await save_sr_zones(DB_PATH, scan_ts, ticker, zones)
 
-                # Engine 2: VCP breakout (pass SPY 3m return for RS filter)
-                # Calculate RS metrics for Path E (RS Strength Breakout)
-                rs_ratio = 0.0
-                rs_52w_high = 0.0
-                rs_blue_dot = False
-                if spy_df is not None:
-                    try:
-                        rs_line = await loop.run_in_executor(
-                            None, calculate_rs_line, df, spy_df
-                        )
-                        if rs_line and len(rs_line) > 0:
-                            rs_stats = get_rs_stats(rs_line)
-                            rs_ratio = rs_stats.get("rs_today", 0.0)
-                            rs_52w_high = rs_stats.get("rs_52w_high", 0.0)
-                            rs_blue_dot = await loop.run_in_executor(
-                                None, detect_rs_blue_dot, rs_line
-                            )
-                    except Exception as exc:
-                        log.warning("RS calculation failed for %s: %s", ticker, exc)
-
+                # Engine 2: VCP breakout (with RS parameters for Path E)
                 vcp = await loop.run_in_executor(
                     None, scan_vcp, ticker, df, zones, spy_3m_return,
                     rs_ratio, rs_52w_high, rs_blue_dot
                 )
                 if vcp:
+                    # Add sector to setup
+                    vcp["sector"] = SECTORS.get(ticker, "Unknown")
                     await save_setup(DB_PATH, scan_ts, vcp)
                     vcp_count += 1
-                    log.info("  VCP      %-6s  entry=%.2f", ticker, vcp["entry"])
+
+                    setup_type = "RS LEAD" if vcp.get("is_rs_lead") else "VCP"
+                    log.info("  %s      %-6s  entry=%.2f", setup_type, ticker, vcp["entry"])
+
                 else:
                     # Only check near-breakout if not already a full setup
                     tl = await loop.run_in_executor(None, detect_trendline, ticker, df)
@@ -272,12 +299,15 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                         None, scan_near_breakout, ticker, df, zones, tl
                     )
                     if near:
+                        near["sector"] = SECTORS.get(ticker, "Unknown")
+                        near["rs_blue_dot"] = rs_blue_dot
                         await save_setup(DB_PATH, scan_ts, near)
                         log.info("  NEAR     %-6s  dist=%.1f%%", ticker, near["distance_pct"])
 
                 # Engine 3: Tactical pullback (strict, then relaxed)
                 pb = await loop.run_in_executor(None, scan_pullback, ticker, df, zones)
                 if pb:
+                    pb["sector"] = SECTORS.get(ticker, "Unknown")
                     await save_setup(DB_PATH, scan_ts, pb)
                     pb_count += 1
                     log.info("  PULLBACK %-6s  entry=%.2f", ticker, pb["entry"])
@@ -287,6 +317,7 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                         None, scan_relaxed_pullback, ticker, df, zones
                     )
                     if pb_relaxed:
+                        pb_relaxed["sector"] = SECTORS.get(ticker, "Unknown")
                         await save_setup(DB_PATH, scan_ts, pb_relaxed)
                         pb_count += 1
                         log.info("  PULLBACK %-6s  entry=%.2f (relaxed)", ticker, pb_relaxed["entry"])
@@ -298,6 +329,35 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
 
         # Gather all ticker tasks; semaphore handles concurrency internally
         await asyncio.gather(*[_process(t, i) for i, t in enumerate(tickers)])
+
+        # ── Sector Summary with Bold Highlighting ───────────────────────────
+        # Sectors with 3+ setups are highlighted in bold for institutional rotation
+        try:
+            all_setups = await get_latest_setups(DB_PATH, scan_ts)
+            sector_counts = {}
+
+            for setup in all_setups:
+                sector = setup.get("sector", "Unknown")
+                sector_counts[sector] = sector_counts.get(sector, 0) + 1
+
+            # Sort by count descending
+            sorted_sectors = sorted(sector_counts.items(), key=lambda x: x[1], reverse=True)
+
+            # Log with visual separator and bold for 3+ setups
+            log.info("═════════════════════════════════════════════════════════")
+            log.info("SECTOR SUMMARY — INSTITUTIONAL ROTATION ALERT")
+            log.info("═════════════════════════════════════════════════════════")
+
+            for sector, count in sorted_sectors:
+                if count >= 3:
+                    # Bold formatting with emoji for high-activity sectors
+                    log.info("🔥 **%s (%d setups)**", sector, count)
+                else:
+                    log.info("   %s (%d setup%s)", sector, count, "s" if count != 1 else "")
+
+            log.info("═════════════════════════════════════════════════════════")
+        except Exception as exc:
+            log.warning("Sector summary failed: %s", exc)
 
         await complete_scan_run(DB_PATH, scan_ts, len(tickers))
         _scan_state["last_completed"] = scan_ts

@@ -1,0 +1,5 @@
+INFO:     Started server process [25400]
+INFO:     Waiting for application startup.
+22:58:35  INFO      SQLite DB initialised at trading.db
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)

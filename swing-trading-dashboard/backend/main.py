@@ -1,0 +1,415 @@
+"""
+Swing Trading Dashboard — FastAPI Backend
+==========================================
+Endpoints
+─────────
+  POST /api/run-scan          Trigger full background scan (non-blocking)
+  GET  /api/scan-status       Poll scan progress
+  GET  /api/regime            Latest SPY regime from DB
+  GET  /api/setups            All setups (VCP + Pullback)
+  GET  /api/setups/vcp        VCP setups only
+  GET  /api/setups/pullback   Pullback setups only
+  GET  /api/sr-zones/{ticker} S/R zones for one ticker (from last scan)
+  GET  /api/chart/{ticker}    OHLCV + EMA8/20 + SMA50 + CCI20 (fresh fetch)
+  GET  /api/health            Health-check
+
+Architecture
+────────────
+  • yfinance calls run in a ThreadPoolExecutor (blocking I/O).
+  • asyncio.Semaphore(5) caps concurrent yfinance requests.
+  • Heavy maths (KDE, curve_fit) also run in executor threads.
+  • All scan results are persisted to SQLite via aiosqlite.
+  • Frontend reads only from the DB — no on-the-fly computation.
+
+Run
+───
+  cd backend
+  uvicorn main:app --reload --host 0.0.0.0 --port 8000
+"""
+
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import Dict, List, Optional
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+
+from indicators import ema as _ema, sma as _sma, cci as _cci
+from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+from database import (
+    complete_scan_run,
+    get_latest_regime,
+    get_latest_scan_timestamp,
+    get_latest_setups,
+    get_sr_zones_for_ticker_from_db,
+    init_db,
+    save_regime,
+    save_scan_run,
+    save_setup,
+    save_sr_zones,
+)
+from engines.engine0 import check_market_regime
+from engines.engine1 import calculate_sr_zones
+from engines.engine2 import scan_vcp
+from engines.engine3 import scan_pullback
+from tickers import SCAN_UNIVERSE
+
+# ────────────────────────────────────────────────────────────────────────────
+# Config
+# ────────────────────────────────────────────────────────────────────────────
+
+DB_PATH = "trading.db"
+CONCURRENCY_LIMIT = 5          # max simultaneous yfinance fetches
+DATA_FETCH_PERIOD = "1y"       # lookback for each ticker
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("swing")
+
+# ────────────────────────────────────────────────────────────────────────────
+# Shared state (single-process; safe with asyncio event loop)
+# ────────────────────────────────────────────────────────────────────────────
+
+_scan_state: Dict = {
+    "in_progress": False,
+    "progress": 0,
+    "total": 0,
+    "started_at": None,
+    "last_completed": None,
+    "last_error": None,
+}
+_semaphore: Optional[asyncio.Semaphore] = None
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# App lifecycle
+# ────────────────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _semaphore
+    _semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+    await init_db(DB_PATH)
+    log.info("SQLite DB initialised at %s", DB_PATH)
+    yield
+
+
+app = FastAPI(
+    title="Swing Trading Dashboard",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Data helpers
+# ────────────────────────────────────────────────────────────────────────────
+
+async def _fetch(ticker: str) -> Optional[pd.DataFrame]:
+    """Download daily OHLCV for one ticker, rate-limited by the semaphore."""
+    async with _semaphore:
+        loop = asyncio.get_event_loop()
+        try:
+            df = await loop.run_in_executor(
+                None,
+                lambda: yf.download(
+                    ticker,
+                    period=DATA_FETCH_PERIOD,
+                    interval="1d",
+                    auto_adjust=False,
+                    prepost=False,
+                    progress=False,
+                    threads=False,
+                ),
+            )
+        except Exception as exc:
+            log.warning("Fetch failed %s: %s", ticker, exc)
+            return None
+
+    if df is None or df.empty:
+        return None
+
+    # Flatten MultiIndex (newer yfinance versions)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    return df
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Background scan worker
+# ────────────────────────────────────────────────────────────────────────────
+
+async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
+    """
+    Full scan pipeline:
+      Engine 0 → (if bullish) Engine 1 → Engine 2 + Engine 3
+    Results written to SQLite; frontend reads from DB.
+    """
+    global _scan_state
+
+    log.info("▶ Scan started  ts=%s  tickers=%d", scan_ts, len(tickers))
+    _scan_state.update(
+        in_progress=True,
+        progress=0,
+        total=len(tickers),
+        started_at=scan_ts,
+        last_error=None,
+    )
+
+    try:
+        await save_scan_run(DB_PATH, scan_ts)
+
+        # ── Engine 0: Market regime ───────────────────────────────────────
+        loop = asyncio.get_event_loop()
+        regime = await loop.run_in_executor(None, check_market_regime)
+        await save_regime(DB_PATH, scan_ts, regime)
+        log.info(
+            "Engine 0: %s  (SPY=%.2f  EMA20=%.2f)",
+            regime["regime"],
+            regime["spy_close"],
+            regime["spy_20ema"],
+        )
+
+        if not regime["is_bullish"]:
+            log.info("Market is BEARISH — Engines 2 & 3 disabled")
+            await complete_scan_run(DB_PATH, scan_ts, 0)
+            _scan_state["last_completed"] = scan_ts
+            return
+
+        # ── Per-ticker processing ─────────────────────────────────────────
+        vcp_count = 0
+        pb_count = 0
+
+        async def _process(ticker: str, idx: int) -> None:
+            nonlocal vcp_count, pb_count
+
+            try:
+                df = await _fetch(ticker)
+                if df is None or len(df) < 60:
+                    return
+
+                # Engine 1: S/R zones
+                zones: List[Dict] = await loop.run_in_executor(
+                    None, calculate_sr_zones, ticker, df
+                )
+                if zones:
+                    await save_sr_zones(DB_PATH, scan_ts, ticker, zones)
+
+                # Engine 2: VCP breakout
+                vcp = await loop.run_in_executor(None, scan_vcp, ticker, df, zones)
+                if vcp:
+                    await save_setup(DB_PATH, scan_ts, vcp)
+                    vcp_count += 1
+                    log.info("  VCP      %-6s  entry=%.2f", ticker, vcp["entry"])
+
+                # Engine 3: Tactical pullback
+                pb = await loop.run_in_executor(None, scan_pullback, ticker, df, zones)
+                if pb:
+                    await save_setup(DB_PATH, scan_ts, pb)
+                    pb_count += 1
+                    log.info("  PULLBACK %-6s  entry=%.2f", ticker, pb["entry"])
+
+            except Exception as exc:
+                log.error("Error processing %s: %s", ticker, exc)
+            finally:
+                _scan_state["progress"] = idx + 1
+
+        # Gather all ticker tasks; semaphore handles concurrency internally
+        await asyncio.gather(*[_process(t, i) for i, t in enumerate(tickers)])
+
+        await complete_scan_run(DB_PATH, scan_ts, len(tickers))
+        _scan_state["last_completed"] = scan_ts
+        log.info("✔ Scan complete  VCP=%d  Pullbacks=%d", vcp_count, pb_count)
+
+    except Exception as exc:
+        log.error("Scan worker crashed: %s", exc)
+        _scan_state["last_error"] = str(exc)
+    finally:
+        _scan_state["in_progress"] = False
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Endpoints
+# ────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/health")
+async def health():
+    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.post("/api/run-scan")
+async def trigger_scan(background_tasks: BackgroundTasks):
+    """
+    Trigger a full market scan.  Returns immediately; scan runs in background.
+    Poll /api/scan-status to track progress.
+    """
+    if _scan_state["in_progress"]:
+        return {
+            "status": "already_running",
+            "progress": _scan_state["progress"],
+            "total": _scan_state["total"],
+        }
+
+    scan_ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+    background_tasks.add_task(_run_scan, scan_ts, SCAN_UNIVERSE)
+
+    return {
+        "status": "started",
+        "scan_timestamp": scan_ts,
+        "tickers": len(SCAN_UNIVERSE),
+        "message": f"Scanning {len(SCAN_UNIVERSE)} tickers in background",
+    }
+
+
+@app.get("/api/scan-status")
+async def scan_status():
+    """Current scan progress (poll this after POST /api/run-scan)."""
+    total = max(_scan_state["total"], 1)
+    return {
+        "in_progress": _scan_state["in_progress"],
+        "progress": _scan_state["progress"],
+        "total": _scan_state["total"],
+        "progress_pct": round(_scan_state["progress"] / total * 100, 1),
+        "started_at": _scan_state["started_at"],
+        "last_completed": _scan_state["last_completed"],
+        "last_error": _scan_state["last_error"],
+    }
+
+
+@app.get("/api/regime")
+async def get_regime():
+    """Latest market regime from the last completed scan."""
+    regime = await get_latest_regime(DB_PATH)
+    if regime is None:
+        return {
+            "regime": "NO_DATA",
+            "is_bullish": False,
+            "spy_close": 0.0,
+            "spy_20ema": 0.0,
+            "scan_timestamp": None,
+        }
+    return regime
+
+
+@app.get("/api/setups")
+async def get_all_setups():
+    """All VCP + Pullback setups from the latest scan."""
+    setups = await get_latest_setups(DB_PATH)
+    return {"setups": setups, "count": len(setups)}
+
+
+@app.get("/api/setups/vcp")
+async def get_vcp_setups():
+    """VCP breakout setups from the latest scan."""
+    setups = await get_latest_setups(DB_PATH, setup_type="VCP")
+    return {"setups": setups, "count": len(setups)}
+
+
+@app.get("/api/setups/pullback")
+async def get_pullback_setups():
+    """Tactical pullback setups from the latest scan."""
+    setups = await get_latest_setups(DB_PATH, setup_type="PULLBACK")
+    return {"setups": setups, "count": len(setups)}
+
+
+@app.get("/api/sr-zones/{ticker}")
+async def get_sr_zones(ticker: str):
+    """S/R zones for a ticker from the last scan (pre-computed, instant)."""
+    zones = await get_sr_zones_for_ticker_from_db(DB_PATH, ticker.upper())
+    return {"ticker": ticker.upper(), "zones": zones, "count": len(zones)}
+
+
+@app.get("/api/chart/{ticker}")
+async def get_chart_data(ticker: str):
+    """
+    Returns chart-ready payload for lightweight-charts:
+      candles  – raw OHLCV (Open/High/Low/Close)
+      ema8     – 8-period EMA of Adj Close
+      ema20    – 20-period EMA of Adj Close
+      sma50    – 50-period SMA of Adj Close
+      cci      – 20-period CCI
+      sr_zones – from last scan DB (pre-computed)
+
+    The candle OHLC uses raw prices (standard charting convention).
+    Indicators are calculated on Adj Close (adjusted for splits/dividends).
+    """
+    sym = ticker.upper()
+    df = await _fetch(sym)
+
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail=f"No data for {sym}")
+    if len(df) < 55:
+        raise HTTPException(status_code=422, detail=f"Insufficient history for {sym}")
+
+    adj = "Adj Close" if "Adj Close" in df.columns else "Close"
+    close_adj = df[adj]
+    high = df["High"]
+    low = df["Low"]
+
+    # Indicators on Adj Close
+    ema8 = _ema(close_adj, 8)
+    ema20 = _ema(close_adj, 20)
+    sma50 = _sma(close_adj, 50)
+    cci20 = _cci(high, low, close_adj, 20)
+
+    def _series(idx, vals, dec=2):
+        out = []
+        for ts, v in zip(idx, vals):
+            if pd.notna(v):
+                out.append({"time": ts.strftime("%Y-%m-%d"), "value": round(float(v), dec)})
+        return out
+
+    # Raw OHLCV candles
+    candles = []
+    for ts, row in df.iterrows():
+        o = row.get("Open", np.nan)
+        h = row.get("High", np.nan)
+        l = row.get("Low", np.nan)
+        c = row.get("Close", np.nan)   # raw close for candle display
+        v = row.get("Volume", 0)
+        if all(pd.notna(x) for x in [o, h, l, c]):
+            candles.append(
+                {
+                    "time": ts.strftime("%Y-%m-%d"),
+                    "open": round(float(o), 2),
+                    "high": round(float(h), 2),
+                    "low": round(float(l), 2),
+                    "close": round(float(c), 2),
+                    "volume": int(v) if pd.notna(v) else 0,
+                }
+            )
+
+    # S/R zones from latest scan (pre-computed)
+    zones = await get_sr_zones_for_ticker_from_db(DB_PATH, sym)
+
+    return {
+        "ticker": sym,
+        "candles": candles,
+        "ema8": _series(df.index, ema8),
+        "ema20": _series(df.index, ema20),
+        "sma50": _series(df.index, sma50),
+        "cci": _series(df.index, cci20, dec=1),
+        "sr_zones": zones,
+    }

@@ -65,11 +65,27 @@ CREATE TABLE IF NOT EXISTS sr_zones (
 );
 """
 
+_CREATE_TRADES = """
+CREATE TABLE IF NOT EXISTS trades (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker      TEXT    NOT NULL,
+    entry_price REAL    NOT NULL,
+    quantity    REAL    NOT NULL,
+    stop_loss   REAL    NOT NULL,
+    target      REAL    NOT NULL,
+    entry_date  TEXT    NOT NULL,
+    notes       TEXT    DEFAULT '',
+    status      TEXT    NOT NULL DEFAULT 'active',
+    created_at  TEXT    DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
 _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_setups_ts     ON scan_setups(scan_timestamp);",
     "CREATE INDEX IF NOT EXISTS idx_setups_type   ON scan_setups(scan_timestamp, setup_type);",
     "CREATE INDEX IF NOT EXISTS idx_zones_ticker  ON sr_zones(ticker, scan_timestamp);",
     "CREATE INDEX IF NOT EXISTS idx_regime_ts     ON market_regime(scan_timestamp);",
+    "CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);",
 ]
 
 
@@ -83,6 +99,7 @@ async def init_db(db_path: str) -> None:
         await db.execute(_CREATE_MARKET_REGIME)
         await db.execute(_CREATE_SCAN_SETUPS)
         await db.execute(_CREATE_SR_ZONES)
+        await db.execute(_CREATE_TRADES)
         for idx_sql in _INDEXES:
             await db.execute(idx_sql)
         await db.commit()
@@ -248,6 +265,68 @@ async def get_latest_setups(
             results.append(record)
 
         return results
+
+
+# ---------------------------------------------------------------------------
+# Trades CRUD
+# ---------------------------------------------------------------------------
+
+async def add_trade(db_path: str, trade: Dict) -> int:
+    """Insert a new active trade; returns the new row id."""
+    async with aiosqlite.connect(db_path) as db:
+        cur = await db.execute(
+            """INSERT INTO trades (ticker, entry_price, quantity, stop_loss, target, entry_date, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                trade["ticker"].upper(),
+                trade["entry_price"],
+                trade["quantity"],
+                trade["stop_loss"],
+                trade["target"],
+                trade["entry_date"],
+                trade.get("notes", ""),
+            ),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def get_trades(db_path: str, status: str = "active") -> List[Dict]:
+    """Return all trades with the given status."""
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute(
+            """SELECT id, ticker, entry_price, quantity, stop_loss, target,
+                      entry_date, notes, status, created_at
+               FROM trades WHERE status = ? ORDER BY created_at DESC""",
+            (status,),
+        ) as cur:
+            rows = await cur.fetchall()
+            return [
+                {
+                    "id":          r[0],
+                    "ticker":      r[1],
+                    "entry_price": r[2],
+                    "quantity":    r[3],
+                    "stop_loss":   r[4],
+                    "target":      r[5],
+                    "entry_date":  r[6],
+                    "notes":       r[7],
+                    "status":      r[8],
+                    "created_at":  r[9],
+                }
+                for r in rows
+            ]
+
+
+async def close_trade(db_path: str, trade_id: int) -> bool:
+    """Mark a trade as closed.  Returns True if a row was updated."""
+    async with aiosqlite.connect(db_path) as db:
+        cur = await db.execute(
+            "UPDATE trades SET status = 'closed' WHERE id = ? AND status = 'active'",
+            (trade_id,),
+        )
+        await db.commit()
+        return cur.rowcount > 0
 
 
 async def get_sr_zones_for_ticker_from_db(db_path: str, ticker: str) -> List[Dict]:

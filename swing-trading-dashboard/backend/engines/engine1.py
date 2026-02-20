@@ -91,8 +91,15 @@ def calculate_sr_zones(
         if len(price_points) < 10:
             return []
 
-        # ── KDE ────────────────────────────────────────────────────────────
-        kde = gaussian_kde(price_points, bw_method="scott")
+        # ── KDE with dynamic bandwidth ─────────────────────────────────────
+        # Coefficient of variation (CV) measures relative spread.
+        # Low-vol stocks (tight CV) need a narrower bandwidth so the kernel
+        # doesn't smear thin zones together.  High-vol stocks use Scott's rule.
+        cv = float(price_points.std() / price_points.mean()) if price_points.mean() > 0 else 0.05
+        n = len(price_points)
+        scott_factor = n ** (-1.0 / 5.0)          # Scott's rule
+        bw_scale = max(0.4, min(1.2, cv / 0.05))  # 0.4 – 1.2 multiplier
+        kde = gaussian_kde(price_points, bw_method=scott_factor * bw_scale)
         p_min = price_points.min() * 0.98
         p_max = price_points.max() * 1.02
         x = np.linspace(p_min, p_max, 600)

@@ -40,6 +40,7 @@ import yfinance as yf
 from indicators import ema as _ema, sma as _sma, cci as _cci
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from database import (
     complete_scan_run,
@@ -52,6 +53,9 @@ from database import (
     save_scan_run,
     save_setup,
     save_sr_zones,
+    add_trade,
+    get_trades,
+    close_trade,
 )
 from engines.engine0 import check_market_regime
 from engines.engine1 import calculate_sr_zones
@@ -64,7 +68,7 @@ from tickers import SCAN_UNIVERSE
 # ────────────────────────────────────────────────────────────────────────────
 
 DB_PATH = "trading.db"
-CONCURRENCY_LIMIT = 5          # max simultaneous yfinance fetches
+CONCURRENCY_LIMIT = 10         # max simultaneous yfinance fetches
 DATA_FETCH_PERIOD = "1y"       # lookback for each ticker
 
 logging.basicConfig(
@@ -198,6 +202,20 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
             _scan_state["last_completed"] = scan_ts
             return
 
+        # ── SPY 3-month return (for Engine 2 relative-strength gate) ─────
+        spy_3m_return = 0.0
+        try:
+            spy_df = await _fetch("SPY")
+            if spy_df is not None and len(spy_df) >= 64:
+                adj_col = "Adj Close" if "Adj Close" in spy_df.columns else "Close"
+                spy_close = spy_df[adj_col]
+                spy_3m_return = float(
+                    spy_close.iloc[-1] / spy_close.iloc[-64] - 1
+                )
+            log.info("SPY 3-month return: %.2f%%", spy_3m_return * 100)
+        except Exception as exc:
+            log.warning("Could not compute SPY 3m return: %s", exc)
+
         # ── Per-ticker processing ─────────────────────────────────────────
         vcp_count = 0
         pb_count = 0
@@ -217,8 +235,10 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                 if zones:
                     await save_sr_zones(DB_PATH, scan_ts, ticker, zones)
 
-                # Engine 2: VCP breakout
-                vcp = await loop.run_in_executor(None, scan_vcp, ticker, df, zones)
+                # Engine 2: VCP breakout (pass SPY 3m return for RS filter)
+                vcp = await loop.run_in_executor(
+                    None, scan_vcp, ticker, df, zones, spy_3m_return
+                )
                 if vcp:
                     await save_setup(DB_PATH, scan_ts, vcp)
                     vcp_count += 1
@@ -413,3 +433,107 @@ async def get_chart_data(ticker: str):
         "cci": _series(df.index, cci20, dec=1),
         "sr_zones": zones,
     }
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Trade endpoints
+# ────────────────────────────────────────────────────────────────────────────
+
+class TradeIn(BaseModel):
+    ticker:      str
+    entry_price: float
+    quantity:    float
+    stop_loss:   float
+    target:      float
+    entry_date:  str
+    notes:       str = ""
+
+
+async def _enrich_trade(trade: Dict) -> Dict:
+    """
+    Fetch fresh market data for a trade and add:
+      current_price, pl_dollar, pl_pct,
+      ema8, ema20, health ('HOLD' | 'CAUTION' | 'EXIT')
+    Falls back gracefully if the fetch fails.
+    """
+    result = {**trade, "current_price": None, "pl_dollar": None,
+              "pl_pct": None, "ema8": None, "ema20": None, "health": "UNKNOWN"}
+    try:
+        df = await _fetch(trade["ticker"])
+        if df is None or len(df) < 25:
+            return result
+
+        adj = "Adj Close" if "Adj Close" in df.columns else "Close"
+        close = df[adj]
+        high  = df["High"]
+        low   = df["Low"]
+
+        ema8_s  = _ema(close, 8)
+        ema20_s = _ema(close, 20)
+        cci20_s = _cci(high, low, close, 20)
+
+        lc   = float(close.iloc[-1])
+        l8   = float(ema8_s.iloc[-1])
+        l20  = float(ema20_s.iloc[-1])
+
+        # CCI hook below 100: was above 100, now crossed below (bearish)
+        cci_hook_below = False
+        if len(cci20_s.dropna()) >= 2:
+            cci_prev = float(cci20_s.dropna().iloc[-2])
+            cci_last = float(cci20_s.dropna().iloc[-1])
+            cci_hook_below = cci_prev > 100 and cci_last < 100
+
+        # Health signal
+        if lc < l20 or cci_hook_below:
+            health = "EXIT"
+        elif lc < l8:          # above 20 EMA but below 8 EMA
+            health = "CAUTION"
+        else:
+            health = "HOLD"
+
+        ep   = trade["entry_price"]
+        qty  = trade["quantity"]
+        pl_d = round((lc - ep) * qty, 2)
+        pl_p = round((lc / ep - 1) * 100, 2) if ep > 0 else 0.0
+
+        result.update({
+            "current_price": round(lc, 2),
+            "pl_dollar":     pl_d,
+            "pl_pct":        pl_p,
+            "ema8":          round(l8, 2),
+            "ema20":         round(l20, 2),
+            "health":        health,
+        })
+    except Exception as exc:
+        log.warning("Trade enrichment failed %s: %s", trade["ticker"], exc)
+    return result
+
+
+@app.post("/api/trades", status_code=201)
+async def create_trade(body: TradeIn):
+    """Add a new active trade to the portfolio."""
+    trade_id = await add_trade(DB_PATH, body.model_dump())
+    return {"id": trade_id, "status": "active", **body.model_dump()}
+
+
+@app.get("/api/trades")
+async def list_trades():
+    """
+    Return all active trades enriched with live price, P/L, and health signal.
+    Fetches are run concurrently (bounded by the shared semaphore).
+    """
+    trades = await get_trades(DB_PATH, status="active")
+    if not trades:
+        return {"trades": [], "count": 0}
+
+    enriched = await asyncio.gather(*[_enrich_trade(t) for t in trades])
+    return {"trades": list(enriched), "count": len(enriched)}
+
+
+@app.delete("/api/trades/{trade_id}", status_code=200)
+async def delete_trade(trade_id: int):
+    """Close (soft-delete) an active trade by id."""
+    ok = await close_trade(DB_PATH, trade_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Trade {trade_id} not found or already closed")
+    return {"id": trade_id, "status": "closed"}

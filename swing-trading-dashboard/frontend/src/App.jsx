@@ -1,11 +1,16 @@
 /**
  * App.jsx — root layout and state orchestrator
  *
+ * Tabs:
+ *  SCANNER   → left panel (VCP + Pullback tables) + right panel (TradingChart)
+ *  PORTFOLIO → full-width PortfolioTab (active trades, health signals, P/L)
+ *
  * Layout (CSS Grid):
  *  ┌────────────────────────── Header (full-width, 62px) ──────────────────┐
- *  │ Left panel (380px)        │  Right panel (flex-1)                     │
- *  │  VCP SetupTable           │   TradingChart (candles + indicators +    │
- *  │  Pullback SetupTable      │   S/R bands + CCI sub-pane)               │
+ *  │  [ SCANNER ]  [ PORTFOLIO ]  ← tab bar (28px)                         │
+ *  │ Left panel (400px)        │  Right panel (flex-1)                     │
+ *  │  VCP SetupTable           │   TradingChart / PortfolioTab             │
+ *  │  Pullback SetupTable      │                                           │
  *  └───────────────────────────┴───────────────────────────────────────────┘
  */
 
@@ -19,9 +24,10 @@ import {
   fetchScanStatus,
 } from './api.js'
 
-import Header       from './components/Header.jsx'
-import SetupTable   from './components/SetupTable.jsx'
-import TradingChart from './components/TradingChart.jsx'
+import Header        from './components/Header.jsx'
+import SetupTable    from './components/SetupTable.jsx'
+import TradingChart  from './components/TradingChart.jsx'
+import PortfolioTab  from './components/PortfolioTab.jsx'
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -36,6 +42,7 @@ const DEFAULT_SCAN_STATUS = {
 }
 
 export default function App() {
+  const [activeTab,      setActiveTab     ] = useState('scanner')
   const [regime,         setRegime        ] = useState(null)
   const [vcpSetups,      setVcpSetups     ] = useState([])
   const [pullbackSetups, setPullbackSetups] = useState([])
@@ -66,8 +73,9 @@ export default function App() {
     }
   }, [])
 
-  // ── Ticker click → load chart data ───────────────────────────────────────
+  // ── Ticker click → load chart data + switch to scanner tab ───────────────
   const handleTickerClick = useCallback(async (ticker) => {
+    setActiveTab('scanner')
     setSelectedTicker(ticker)
     setChartData(null)
     setLoadingChart(true)
@@ -80,7 +88,7 @@ export default function App() {
     } finally {
       setLoadingChart(false)
     }
-  }, [selectedTicker])
+  }, [])
 
   // ── Run scan ──────────────────────────────────────────────────────────────
   const handleRunScan = useCallback(async () => {
@@ -103,7 +111,6 @@ export default function App() {
 
         if (!status.in_progress) {
           clearInterval(pollTimerRef.current)
-          // Reload all data once scan finishes
           loadAllData()
         }
       } catch (err) {
@@ -116,15 +123,12 @@ export default function App() {
 
   // ── Initial load ──────────────────────────────────────────────────────────
   useEffect(() => {
-    // Load existing DB data immediately on mount
     loadAllData()
 
-    // Auto-load ticker from URL param (?ticker=AAPL)
     const params = new URLSearchParams(window.location.search)
     const t = params.get('ticker')
     if (t) handleTickerClick(t.toUpperCase())
 
-    // Also check if a scan is already running
     fetchScanStatus()
       .then((s) => setScanStatus(s))
       .catch(() => {})
@@ -144,56 +148,114 @@ export default function App() {
         onSearchTicker={handleTickerClick}
       />
 
+      {/* ── Tab bar ────────────────────────────────────────────────────── */}
+      <div
+        className="flex items-stretch flex-shrink-0"
+        style={{
+          borderBottom: '1px solid var(--border)',
+          background: 'var(--surface)',
+          height: 30,
+        }}
+      >
+        {['scanner', 'portfolio'].map((tab) => {
+          const active = activeTab === tab
+          return (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              style={{
+                fontFamily: 'Barlow Condensed, sans-serif',
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: '0.15em',
+                textTransform: 'uppercase',
+                padding: '0 18px',
+                background: 'transparent',
+                border: 'none',
+                borderBottom: active ? '2px solid var(--accent)' : '2px solid transparent',
+                color: active ? 'var(--accent)' : 'var(--muted)',
+                cursor: 'pointer',
+                transition: 'color 0.12s, border-color 0.12s',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+              }}
+            >
+              {tab === 'scanner' ? 'SCANNER' : 'PORTFOLIO'}
+              {tab === 'portfolio' && (
+                <span
+                  style={{
+                    fontSize: 9,
+                    background: active ? 'rgba(245,166,35,0.2)' : 'var(--border)',
+                    color: active ? 'var(--accent)' : 'var(--muted)',
+                    padding: '1px 5px',
+                    borderRadius: 2,
+                  }}
+                >
+                  TRADES
+                </span>
+              )}
+            </button>
+          )
+        })}
+      </div>
+
       {/* ── Body ───────────────────────────────────────────────────────── */}
       <div className="flex flex-1 min-h-0">
 
-        {/* Left panel — setup tables */}
-        <aside
-          className="flex flex-col overflow-y-auto flex-shrink-0"
-          style={{
-            width: 400,
-            borderRight: '1px solid var(--border)',
-            background: 'var(--panel)',
-          }}
-        >
-          {/* VCP */}
-          <SetupTable
-            title="VCP Breakouts"
-            accentColor="blue"
-            setups={vcpSetups}
-            selectedTicker={selectedTicker}
-            onSelectTicker={handleTickerClick}
-            loading={loadingSetups}
-          />
+        {activeTab === 'scanner' ? (
+          <>
+            {/* Left panel — setup tables */}
+            <aside
+              className="flex flex-col overflow-y-auto flex-shrink-0"
+              style={{
+                width: 400,
+                borderRight: '1px solid var(--border)',
+                background: 'var(--panel)',
+              }}
+            >
+              <SetupTable
+                title="VCP Breakouts"
+                accentColor="blue"
+                setups={vcpSetups}
+                selectedTicker={selectedTicker}
+                onSelectTicker={handleTickerClick}
+                loading={loadingSetups}
+              />
 
-          {/* Pullback */}
-          <SetupTable
-            title="Tactical Pullbacks"
-            accentColor="accent"
-            setups={pullbackSetups}
-            selectedTicker={selectedTicker}
-            onSelectTicker={handleTickerClick}
-            loading={loadingSetups}
-          />
+              <SetupTable
+                title="Tactical Pullbacks"
+                accentColor="accent"
+                setups={pullbackSetups}
+                selectedTicker={selectedTicker}
+                onSelectTicker={handleTickerClick}
+                loading={loadingSetups}
+              />
 
-          {/* Footer — last scan info */}
-          <div className="mt-auto px-3 py-3 border-t border-t-border">
-            <ScanFooter
-              vcpCount={vcpSetups.length}
-              pbCount={pullbackSetups.length}
-              scanTimestamp={scanStatus.last_completed}
-            />
+              <div className="mt-auto px-3 py-3 border-t border-t-border">
+                <ScanFooter
+                  vcpCount={vcpSetups.length}
+                  pbCount={pullbackSetups.length}
+                  scanTimestamp={scanStatus.last_completed}
+                />
+              </div>
+            </aside>
+
+            {/* Right panel — chart */}
+            <main className="flex-1 min-w-0 overflow-hidden" style={{ background: 'var(--bg)' }}>
+              <TradingChart
+                ticker={selectedTicker}
+                chartData={chartData}
+                loading={loadingChart}
+              />
+            </main>
+          </>
+        ) : (
+          /* Portfolio tab — full width */
+          <div className="flex-1 min-w-0 overflow-hidden">
+            <PortfolioTab onTickerClick={handleTickerClick} />
           </div>
-        </aside>
-
-        {/* Right panel — chart */}
-        <main className="flex-1 min-w-0 overflow-hidden" style={{ background: 'var(--bg)' }}>
-          <TradingChart
-            ticker={selectedTicker}
-            chartData={chartData}
-            loading={loadingChart}
-          />
-        </main>
+        )}
 
       </div>
     </div>

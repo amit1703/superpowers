@@ -30,3 +30,18 @@ export const triggerScan = () =>
 
 export const fetchScanStatus = () =>
   fetch('/api/scan-status').then(handleResponse)
+
+// ── Trades ────────────────────────────────────────────────────────────────
+
+export const fetchTrades = () =>
+  fetch('/api/trades').then(handleResponse)
+
+export const addTrade = (body) =>
+  fetch('/api/trades', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(handleResponse)
+
+export const closeTrade = (id) =>
+  fetch(`/api/trades/${id}`, { method: 'DELETE' }).then(handleResponse)

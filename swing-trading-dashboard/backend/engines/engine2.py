@@ -225,16 +225,26 @@ def scan_vcp(
     df: pd.DataFrame,
     sr_zones: List[Dict],
     spy_3m_return: float = 0.0,
+    rs_ratio: float = 0.0,
+    rs_52w_high: float = 0.0,
+    rs_blue_dot: bool = False,
 ) -> Optional[Dict]:
     """
-    Returns a setup dict if a valid VCP (Path A) or Confirmed Breakout
-    (Path B) is found, else None.
+    Returns a setup dict if a valid VCP (Path A), Confirmed Breakout (Path B),
+    Trendline Breakout (Path C), KDE Breakout (Path D), or RS Strength Breakout
+    (Path E) is found, else None.
 
     Parameters
     ----------
     spy_3m_return : float
         SPY's 63-day (≈3 month) return, computed once per scan in main.py.
         Used for the relative-strength gate in Path B.
+    rs_ratio : float
+        Current RS ratio (stock/SPY).
+    rs_52w_high : float
+        52-week high of the RS ratio.
+    rs_blue_dot : bool
+        True if RS ratio is at 52-week high (institutional signal).
     """
     try:
         data = _prep(df)
@@ -335,6 +345,10 @@ def scan_vcp(
                     "rs_vs_spy":          rs_vs_spy,
                     "tr_contraction_pct": None,
                     "is_trendline_breakout": False,
+                    "is_kde_breakout":    False,
+                    "is_rs_lead":         False,
+                    "rs_ratio_today":     rs_ratio,
+                    "rs_52w_high":        rs_52w_high,
                     "trendline":          None,
                 }
 
@@ -374,6 +388,10 @@ def scan_vcp(
                     "rs_vs_spy":          rs_vs_spy,
                     "tr_contraction_pct": None,
                     "is_trendline_breakout": True,
+                    "is_kde_breakout":    False,
+                    "is_rs_lead":         False,
+                    "rs_ratio_today":     rs_ratio,
+                    "rs_52w_high":        rs_52w_high,
                     "trendline":          trendline_data,
                 }
 
@@ -424,6 +442,56 @@ def scan_vcp(
                         "tr_contraction_pct": None,
                         "is_trendline_breakout": False,
                         "is_kde_breakout":    True,
+                        "is_rs_lead":         False,
+                        "rs_ratio_today":     rs_ratio,
+                        "rs_52w_high":        rs_52w_high,
+                        "trendline":          None,
+                    }
+
+        # ── PATH E — RS Strength Breakout ────────────────────────────────────
+        # Institutional accumulation signal: RS Blue Dot + proximity to resistance
+        # Less strict than VCP/DRY, focuses on early institutional moves
+
+        if highest_res is not None and rs_blue_dot:
+            upper = highest_res["upper"]
+            pct_below_upper = (upper - lc) / upper if upper > 0 else 1.0
+
+            # Check: within 3% below resistance + RS Blue Dot (no volume requirement)
+            is_rs_lead = (
+                pct_below_upper <= 0.03 and
+                lc < upper and
+                l8 > l20 and
+                lc > l50
+            )
+
+            if is_rs_lead:
+                entry      = round(lh * 1.001, 2)
+                stop_base  = min(ll, highest_res["lower"])
+                stop_loss  = round(stop_base - 0.2 * latr, 2)
+                risk       = entry - stop_loss
+
+                if risk > 0 and risk <= entry * 0.15:
+                    take_profit = round(entry + 2.0 * risk, 2)
+                    return {
+                        "ticker":             ticker,
+                        "setup_type":         "VCP",
+                        "entry":              entry,
+                        "stop_loss":          stop_loss,
+                        "take_profit":        take_profit,
+                        "rr":                 2.0,
+                        "setup_date":         str(data.index[-1].date()),
+                        "is_breakout":        True,
+                        "is_vol_surge":       False,
+                        "volume_ratio":       volume_ratio,
+                        "resistance_level":   highest_res["level"],
+                        "breakout_pct":       round(pct_below_upper * 100, 2),
+                        "rs_vs_spy":          rs_vs_spy,
+                        "tr_contraction_pct": None,
+                        "is_trendline_breakout": False,
+                        "is_kde_breakout":    False,
+                        "is_rs_lead":         True,
+                        "rs_ratio_today":     rs_ratio,
+                        "rs_52w_high":        rs_52w_high,
                         "trendline":          None,
                     }
 
@@ -513,6 +581,10 @@ def scan_vcp(
             "rs_vs_spy":          rs_vs_spy,
             "tr_contraction_pct": round((1 - last5_tr / prev20_tr) * 100, 1),
             "is_trendline_breakout": False,
+            "is_kde_breakout":    False,
+            "is_rs_lead":         False,
+            "rs_ratio_today":     rs_ratio,
+            "rs_52w_high":        rs_52w_high,
             "trendline":          None,
         }
 

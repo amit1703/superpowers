@@ -61,6 +61,7 @@ from engines.engine0 import check_market_regime
 from engines.engine1 import calculate_sr_zones
 from engines.engine2 import scan_vcp, detect_trendline, scan_near_breakout
 from engines.engine3 import scan_pullback, scan_relaxed_pullback
+from engines.engine4 import calculate_rs_line, detect_rs_blue_dot, get_rs_stats
 from tickers import SCAN_UNIVERSE
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -204,6 +205,7 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
 
         # ── SPY 3-month return (for Engine 2 relative-strength gate) ─────
         spy_3m_return = 0.0
+        spy_df = None
         try:
             spy_df = await _fetch("SPY")
             if spy_df is not None and len(spy_df) >= 64:
@@ -236,8 +238,28 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                     await save_sr_zones(DB_PATH, scan_ts, ticker, zones)
 
                 # Engine 2: VCP breakout (pass SPY 3m return for RS filter)
+                # Calculate RS metrics for Path E (RS Strength Breakout)
+                rs_ratio = 0.0
+                rs_52w_high = 0.0
+                rs_blue_dot = False
+                if spy_df is not None:
+                    try:
+                        rs_line = await loop.run_in_executor(
+                            None, calculate_rs_line, df, spy_df
+                        )
+                        if rs_line and len(rs_line) > 0:
+                            rs_stats = get_rs_stats(rs_line)
+                            rs_ratio = rs_stats.get("rs_today", 0.0)
+                            rs_52w_high = rs_stats.get("rs_52w_high", 0.0)
+                            rs_blue_dot = await loop.run_in_executor(
+                                None, detect_rs_blue_dot, rs_line
+                            )
+                    except Exception as exc:
+                        log.warning("RS calculation failed for %s: %s", ticker, exc)
+
                 vcp = await loop.run_in_executor(
-                    None, scan_vcp, ticker, df, zones, spy_3m_return
+                    None, scan_vcp, ticker, df, zones, spy_3m_return,
+                    rs_ratio, rs_52w_high, rs_blue_dot
                 )
                 if vcp:
                     await save_setup(DB_PATH, scan_ts, vcp)

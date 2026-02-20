@@ -85,7 +85,18 @@ Use `--url-host` to control what hostname is printed in the returned URL JSON.
 
 4. **Iterate or advance** — if feedback changes current screen, write a new file (e.g., `layout-v2.html`). Only move to the next question when the current step is validated.
 
-5. Repeat until done.
+5. **Unload when returning to terminal** — when the next step doesn't need the browser (e.g., a clarifying question, a tradeoff discussion), push a waiting screen to clear the stale content:
+
+   ```html
+   <!-- filename: waiting.html (or waiting-2.html, etc.) -->
+   <div style="display:flex;align-items:center;justify-content:center;min-height:60vh">
+     <p class="subtitle">Continuing in terminal...</p>
+   </div>
+   ```
+
+   This prevents the user from staring at a resolved choice while the conversation has moved on. When the next visual question comes up, push a new content file as usual.
+
+6. Repeat until done.
 
 ## Writing Content Fragments
 

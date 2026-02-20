@@ -35,6 +35,7 @@ const COLORS = {
   cci:          '#9B6EFF',
   cciOb:        'rgba(255, 45, 85, 0.12)',
   cciOs:        'rgba(0, 200, 122, 0.10)',
+  trendline:    '#FFFFFF',
 }
 
 const SHARED_CHART_OPTS = {
@@ -169,6 +170,20 @@ export default function TradingChart({ ticker, chartData, loading }) {
     })
     if (chartData.sma50?.length) sma50Series.setData(chartData.sma50)
 
+    // ── Trendline (bright white diagonal line) ────────────────────────────
+    let trendlineSeries = null
+    if (chartData.trendline?.series?.length) {
+      trendlineSeries = mainChart.addLineSeries({
+        color:            COLORS.trendline,
+        lineWidth:        1.5,
+        lineStyle:        LineStyle.Solid,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      })
+      trendlineSeries.setData(chartData.trendline.series)
+    }
+
     // ── CCI line series ────────────────────────────────────────────────────
     const cciSeries = cciChart.addLineSeries({
       color:            COLORS.cci,
@@ -228,16 +243,18 @@ export default function TradingChart({ ticker, chartData, loading }) {
       const e8     = param.seriesData.get(ema8Series)
       const e20    = param.seriesData.get(ema20Series)
       const s50    = param.seriesData.get(sma50Series)
+      const tl     = trendlineSeries ? param.seriesData.get(trendlineSeries) : null
 
       setLegend({
-        time:  param.time,
-        open:  candle?.open,
-        high:  candle?.high,
-        low:   candle?.low,
-        close: candle?.close,
-        ema8:  e8?.value,
-        ema20: e20?.value,
-        sma50: s50?.value,
+        time:      param.time,
+        open:      candle?.open,
+        high:      candle?.high,
+        low:       candle?.low,
+        close:     candle?.close,
+        ema8:      e8?.value,
+        ema20:     e20?.value,
+        sma50:     s50?.value,
+        trendline: tl?.value,
       })
     })
 
@@ -308,6 +325,9 @@ export default function TradingChart({ ticker, chartData, loading }) {
           <LegendItem dot={COLORS.ema8}  label="EMA-8"  value={legend?.ema8}  />
           <LegendItem dot={COLORS.ema20} label="EMA-20" value={legend?.ema20} />
           <LegendItem dot={COLORS.sma50} label="SMA-50" value={legend?.sma50} dashed />
+          {chartData.trendline?.series?.length > 0 && (
+            <LegendItem dot={COLORS.trendline} label="TDL" value={legend?.trendline} />
+          )}
         </div>
 
         {/* OHLC from crosshair */}

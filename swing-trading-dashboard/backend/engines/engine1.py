@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from scipy.signal import argrelextrema
+from scipy.signal import argrelextrema, find_peaks
 from scipy.stats import gaussian_kde
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -85,36 +85,75 @@ def calculate_sr_zones(
         ph_idx = argrelextrema(hi, np.greater_equal, order=order)[0]
         pl_idx = argrelextrema(lo, np.less_equal, order=order)[0]
 
-        price_points = np.concatenate([cl, hi[ph_idx], lo[pl_idx]])
-        price_points = price_points[~np.isnan(price_points) & (price_points > 0)]
+        # Collect price points with their corresponding dates for recency weighting
+        price_raw = np.concatenate([cl, hi[ph_idx], lo[pl_idx]])
+        dates_raw = np.concatenate([
+            weekly.index.values,
+            weekly.index[ph_idx].values,
+            weekly.index[pl_idx].values,
+        ])
+
+        # Filter out NaN/non-positive prices
+        mask = ~np.isnan(price_raw) & (price_raw > 0)
+        price_points = price_raw[mask]
+        dates_valid = dates_raw[mask]
 
         if len(price_points) < 10:
             return []
 
-        # ── KDE with dynamic bandwidth ─────────────────────────────────────
-        # Coefficient of variation (CV) measures relative spread.
-        # Low-vol stocks (tight CV) need a narrower bandwidth so the kernel
-        # doesn't smear thin zones together.  High-vol stocks use Scott's rule.
+        # ── Recency-weighted KDE ──────────────────────────────────────────────
+        # Compute days ago for each price point
+        today = np.datetime64('today', 'D')
+        days_ago = (today - dates_valid.astype('datetime64[D]')).astype(float)
+        days_ago = np.maximum(days_ago, 0.0)
+
+        # Recency weight: 2.0 for ≤90 days, 1.0 for ≥365 days, linear interpolation between
+        weights = np.where(
+            days_ago <= 90,
+            2.0,
+            np.where(
+                days_ago >= 365,
+                1.0,
+                2.0 - (days_ago - 90) / 275.0
+            )
+        )
+        weights = np.maximum(weights, 0.1)  # Ensure all weights are positive
+
+        # Dynamic bandwidth based on coefficient of variation
         cv = float(price_points.std() / price_points.mean()) if price_points.mean() > 0 else 0.05
         n = len(price_points)
         scott_factor = n ** (-1.0 / 5.0)          # Scott's rule
         bw_scale = max(0.4, min(1.2, cv / 0.05))  # 0.4 – 1.2 multiplier
-        kde = gaussian_kde(price_points, bw_method=scott_factor * bw_scale)
+
+        # KDE with recency weights
+        kde = gaussian_kde(price_points, bw_method=scott_factor * bw_scale, weights=weights)
         p_min = price_points.min() * 0.98
         p_max = price_points.max() * 1.02
         x = np.linspace(p_min, p_max, 600)
         density = kde(x)
 
-        peak_idx = argrelextrema(density, np.greater, order=8)[0]
+        # Peak detection with find_peaks (lower prominence threshold than argrelextrema)
+        prominence_threshold = np.percentile(density, 5)
+        min_dist = max(4, int(len(x) * 0.008))
+        peak_idx, _ = find_peaks(density, prominence=prominence_threshold, distance=min_dist)
+
         if len(peak_idx) == 0:
             return []
+
+        # Get current price for proximity filtering
+        current_price = float(data[adj_col].iloc[-1])
 
         peak_prices = x[peak_idx]
         peak_densities = density[peak_idx]
 
-        # Keep only statistically significant peaks (top 70 %)
+        # Always include peaks within 3% of current price; also include top 70% by density
+        pct_diff = np.abs(peak_prices - current_price) / current_price
+        is_proximity = pct_diff <= 0.03
+
         threshold = np.percentile(peak_densities, 30)
-        peak_prices = peak_prices[peak_densities >= threshold]
+        keep_mask = (peak_densities >= threshold) | is_proximity
+        peak_prices = peak_prices[keep_mask]
+        is_proximity_filtered = is_proximity[keep_mask]
 
         # ── Merge nearby peaks (within 1 ATR) ────────────────────────────
         merged: List[float] = []
@@ -127,12 +166,14 @@ def calculate_sr_zones(
                 cluster = [p]
         merged.append(float(np.mean(cluster)))
 
-        # ── Build zone dicts ─────────────────────────────────────────────
-        current_price = float(data[adj_col].iloc[-1])
+        # ── Build zone dicts with is_primary flag ────────────────────────────
         zones: List[Dict] = []
 
-        for level in merged:
+        for i, level in enumerate(merged):
             zone_type = "RESISTANCE" if level > current_price else "SUPPORT"
+            # Mark as primary if within 3% of current price
+            pct_diff = abs(level - current_price) / current_price
+            is_primary = pct_diff <= 0.03
             zones.append(
                 {
                     "level": round(level, 2),
@@ -140,6 +181,7 @@ def calculate_sr_zones(
                     "lower": round(level - zone_half_width, 2),
                     "type": zone_type,
                     "atr": round(daily_atr, 2),
+                    "is_primary": is_primary,
                 }
             )
 

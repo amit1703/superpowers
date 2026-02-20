@@ -32,6 +32,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
+from scipy.signal import find_peaks
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from indicators import ema as _ema, sma as _sma, atr as _atr, true_range as _tr
@@ -40,6 +41,184 @@ from indicators import ema as _ema, sma as _sma, atr as _atr, true_range as _tr
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def detect_trendline(
+    ticker: str,
+    df: pd.DataFrame,
+) -> Optional[Dict]:
+    """
+    Detect a descending trendline from the last 120 days of High prices.
+
+    Algorithm:
+    1. Find swing highs using find_peaks on last 120 days
+    2. Take the 2 most prominent peaks
+    3. Fit a line through them (compute slope)
+    4. Validate: negative slope, ≥2 touches within 0.8%
+    5. Generate {time, value} series from peak1 to today
+
+    Returns dict with keys: series, peak1, peak2, slope, touches
+    Or None if no valid trendline found.
+    """
+    try:
+        data = _prep(df)
+        if data is None or len(data) < 30:
+            return None
+
+        high = data["High"].values
+        dates = data.index
+
+        # Use last 120 days for peak detection
+        lookback = min(120, len(high))
+        highs = high[-lookback:]
+        date_slice = dates[-lookback:]
+
+        # Find swing highs with find_peaks
+        prominence_threshold = float(np.std(highs)) * 0.3
+        peak_idx, props = find_peaks(highs, prominence=prominence_threshold, distance=5)
+
+        if len(peak_idx) < 2:
+            return None
+
+        # Sort by prominence (descending), take top 2, then sort by time
+        prominences = props["prominences"]
+        sorted_order = np.argsort(prominences)[::-1]
+        top2_raw = peak_idx[sorted_order[:2]]
+        top2 = sorted(top2_raw.tolist())  # Sort by time index
+
+        p1_idx, p2_idx = top2[0], top2[1]
+        p1_price = float(highs[p1_idx])
+        p2_price = float(highs[p2_idx])
+        p1_date = date_slice[p1_idx]
+        p2_date = date_slice[p2_idx]
+
+        # Compute slope (price per day)
+        day_diff = (p2_date - p1_date).days
+        if day_diff <= 0:
+            return None
+
+        slope = (p2_price - p1_price) / day_diff
+
+        # Validate: must be descending (negative slope)
+        if slope >= 0:
+            return None
+
+        # Count touches: bars within 0.8% of trendline value
+        touches = 0
+        for i in range(len(highs)):
+            days_from_p1 = (date_slice[i] - p1_date).days
+            trendline_val = p1_price + slope * days_from_p1
+            if trendline_val > 0 and abs(highs[i] - trendline_val) / trendline_val <= 0.008:
+                touches += 1
+
+        if touches < 2:
+            return None
+
+        # Generate series at actual trading dates from p1 to end of df
+        series = []
+        for date in data.index:
+            if date < p1_date:
+                continue
+            days_from_p1 = (date - p1_date).days
+            val = p1_price + slope * days_from_p1
+            if val > 0:
+                series.append({
+                    "time": date.strftime("%Y-%m-%d"),
+                    "value": round(float(val), 2)
+                })
+
+        if not series:
+            return None
+
+        return {
+            "series": series,
+            "peak1": {
+                "date": p1_date.strftime("%Y-%m-%d"),
+                "price": round(p1_price, 2),
+            },
+            "peak2": {
+                "date": p2_date.strftime("%Y-%m-%d"),
+                "price": round(p2_price, 2),
+            },
+            "slope": round(slope, 6),
+            "touches": touches,
+        }
+
+    except Exception as exc:  # noqa: BLE001
+        print(f"[detect_trendline] {ticker}: {exc}")
+        return None
+
+
+def scan_near_breakout(
+    ticker: str,
+    df: pd.DataFrame,
+    sr_zones: List[Dict],
+    trendline: Optional[Dict] = None,
+) -> Optional[Dict]:
+    """
+    Returns a near-breakout dict if price is within 1.5% BELOW a resistance
+    zone's upper boundary OR a descending trendline value.
+
+    Does NOT require volume surge — purely proximity-based.
+    Returns: {ticker, distance_pct, pattern_type, level, setup_type}
+    Or None if not near any level.
+    """
+    try:
+        data = _prep(df)
+        if data is None or len(data) < 20:
+            return None
+
+        adj = _adj_col(data)
+        lc = float(data[adj].iloc[-1])
+
+        PROXIMITY_PCT = 0.015   # 1.5% below level
+
+        best_dist: Optional[float] = None
+        best_level: Optional[float] = None
+        best_type: Optional[str] = None
+
+        # Check KDE resistance zones
+        resistance_zones = [z for z in sr_zones if z["type"] == "RESISTANCE"]
+        for z in resistance_zones:
+            upper = z["upper"]
+            if upper > lc:
+                dist = (upper - lc) / upper
+                if dist <= PROXIMITY_PCT:
+                    if best_dist is None or dist < best_dist:
+                        best_dist = dist
+                        best_level = z["level"]
+                        best_type = "KDE"
+
+        # Check descending trendline (takes priority if closer)
+        if trendline and trendline.get("series"):
+            tl_today = trendline["series"][-1]["value"]
+            if tl_today > lc:
+                dist = (tl_today - lc) / tl_today
+                if dist <= PROXIMITY_PCT:
+                    if best_dist is None or dist < best_dist:
+                        best_dist = dist
+                        best_level = tl_today
+                        best_type = "TDL"
+
+        if best_dist is None:
+            return None
+
+        return {
+            "ticker":      ticker,
+            "setup_type":  "WATCHLIST",
+            "entry":       round(lc, 2),      # current price (placeholder)
+            "stop_loss":   0.0,
+            "take_profit": 0.0,
+            "rr":          0.0,
+            "setup_date":  str(data.index[-1].date()),
+            "distance_pct": round(best_dist * 100, 2),
+            "pattern_type": best_type,
+            "level":        round(best_level, 2),
+        }
+
+    except Exception as exc:
+        print(f"[scan_near_breakout] {ticker}: {exc}")
+        return None
+
 
 def scan_vcp(
     ticker: str,
@@ -135,7 +314,7 @@ def scan_vcp(
             stop_loss  = round(stop_base - 0.2 * latr, 2)
             risk       = entry - stop_loss
             if risk <= 0 or risk > entry * 0.15:
-                pass  # fall through to Path A check
+                pass  # fall through to Path C/A check
             else:
                 take_profit = round(entry + 2.0 * risk, 2)
                 return {
@@ -155,6 +334,47 @@ def scan_vcp(
                     ),
                     "rs_vs_spy":          rs_vs_spy,
                     "tr_contraction_pct": None,
+                    "is_trendline_breakout": False,
+                    "trendline":          None,
+                }
+
+        # ── PATH C — Trendline Breakout ────────────────────────────────────
+        # Check if price broke above a descending trendline with volume
+        trendline_result = detect_trendline(ticker, df)
+        is_trendline_breakout = False
+        trendline_data = None
+
+        if trendline_result is not None and trendline_result.get("series"):
+            tl_today = trendline_result["series"][-1]["value"]
+            # Breakout: close above trendline + vol surge ≥120% + trend filter (already checked)
+            if lc > tl_today and lvol >= 1.2 * avg_vol:
+                is_trendline_breakout = True
+                trendline_data = trendline_result
+
+        if is_trendline_breakout and trendline_data is not None:
+            entry      = round(lh * 1.001, 2)
+            stop_base  = min(ll, 0.98 * trendline_data["series"][-1]["value"])
+            stop_loss  = round(stop_base - 0.2 * latr, 2)
+            risk       = entry - stop_loss
+            if risk > 0 and risk <= entry * 0.15:
+                take_profit = round(entry + 2.0 * risk, 2)
+                return {
+                    "ticker":             ticker,
+                    "setup_type":         "VCP",
+                    "entry":              entry,
+                    "stop_loss":          stop_loss,
+                    "take_profit":        take_profit,
+                    "rr":                 2.0,
+                    "setup_date":         str(data.index[-1].date()),
+                    "is_breakout":        True,
+                    "is_vol_surge":       lvol >= 1.5 * avg_vol,
+                    "volume_ratio":       volume_ratio,
+                    "resistance_level":   None,
+                    "breakout_pct":       None,
+                    "rs_vs_spy":          rs_vs_spy,
+                    "tr_contraction_pct": None,
+                    "is_trendline_breakout": True,
+                    "trendline":          trendline_data,
                 }
 
         # ── PATH A — DRY (Coiled Spring) ──────────────────────────────────
@@ -242,6 +462,8 @@ def scan_vcp(
             "breakout_pct":       None,
             "rs_vs_spy":          rs_vs_spy,
             "tr_contraction_pct": round((1 - last5_tr / prev20_tr) * 100, 1),
+            "is_trendline_breakout": False,
+            "trendline":          None,
         }
 
     except Exception as exc:  # noqa: BLE001

@@ -22,12 +22,14 @@ import {
   fetchChartData,
   triggerScan,
   fetchScanStatus,
+  fetchWatchlist,
 } from './api.js'
 
 import Header        from './components/Header.jsx'
 import SetupTable    from './components/SetupTable.jsx'
 import TradingChart  from './components/TradingChart.jsx'
 import PortfolioTab  from './components/PortfolioTab.jsx'
+import WatchlistPanel from './components/WatchlistPanel.jsx'
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -46,6 +48,7 @@ export default function App() {
   const [regime,         setRegime        ] = useState(null)
   const [vcpSetups,      setVcpSetups     ] = useState([])
   const [pullbackSetups, setPullbackSetups] = useState([])
+  const [watchlistItems, setWatchlistItems] = useState([])
   const [selectedTicker, setSelectedTicker] = useState(null)
   const [chartData,      setChartData     ] = useState(null)
   const [loadingSetups,  setLoadingSetups ] = useState(false)
@@ -58,14 +61,16 @@ export default function App() {
   const loadAllData = useCallback(async () => {
     setLoadingSetups(true)
     try {
-      const [reg, vcp, pb] = await Promise.all([
+      const [reg, vcp, pb, wl] = await Promise.all([
         fetchRegime(),
         fetchSetups('vcp'),
         fetchSetups('pullback'),
+        fetchWatchlist(),
       ])
       setRegime(reg)
       setVcpSetups(vcp.setups     ?? [])
       setPullbackSetups(pb.setups ?? [])
+      setWatchlistItems(wl.items  ?? [])
     } catch (err) {
       console.error('[App] loadAllData:', err)
     } finally {
@@ -205,7 +210,15 @@ export default function App() {
 
         {activeTab === 'scanner' ? (
           <>
-            {/* Left panel — setup tables */}
+            {/* Watchlist panel (narrow, leftmost) */}
+            <WatchlistPanel
+              items={watchlistItems}
+              selectedTicker={selectedTicker}
+              onSelectTicker={handleTickerClick}
+              loading={loadingSetups}
+            />
+
+            {/* Left panel — setup tables (400px) */}
             <aside
               className="flex flex-col overflow-y-auto flex-shrink-0"
               style={{

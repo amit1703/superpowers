@@ -19,6 +19,9 @@ export const fetchSetups = (type) =>
 export const fetchAllSetups = () =>
   fetch('/api/setups').then(handleResponse)
 
+export const fetchWatchlist = () =>
+  fetch('/api/watchlist').then(handleResponse)
+
 export const fetchChartData = (ticker) =>
   fetch(`/api/chart/${ticker}`).then(handleResponse)
 

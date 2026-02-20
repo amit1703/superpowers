@@ -59,7 +59,7 @@ from database import (
 )
 from engines.engine0 import check_market_regime
 from engines.engine1 import calculate_sr_zones
-from engines.engine2 import scan_vcp
+from engines.engine2 import scan_vcp, detect_trendline, scan_near_breakout
 from engines.engine3 import scan_pullback
 from tickers import SCAN_UNIVERSE
 
@@ -243,6 +243,15 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                     await save_setup(DB_PATH, scan_ts, vcp)
                     vcp_count += 1
                     log.info("  VCP      %-6s  entry=%.2f", ticker, vcp["entry"])
+                else:
+                    # Only check near-breakout if not already a full setup
+                    tl = await loop.run_in_executor(None, detect_trendline, ticker, df)
+                    near = await loop.run_in_executor(
+                        None, scan_near_breakout, ticker, df, zones, tl
+                    )
+                    if near:
+                        await save_setup(DB_PATH, scan_ts, near)
+                        log.info("  NEAR     %-6s  dist=%.1f%%", ticker, near["distance_pct"])
 
                 # Engine 3: Tactical pullback
                 pb = await loop.run_in_executor(None, scan_pullback, ticker, df, zones)
@@ -354,6 +363,15 @@ async def get_pullback_setups():
     return {"setups": setups, "count": len(setups)}
 
 
+@app.get("/api/watchlist")
+async def get_watchlist():
+    """Near-breakout tickers from the latest scan (within 1.5% of KDE/TDL level)."""
+    items = await get_latest_setups(DB_PATH, setup_type="WATCHLIST")
+    # Sort by distance_pct ascending (closest first)
+    items.sort(key=lambda x: x.get("distance_pct", 99))
+    return {"items": items, "count": len(items)}
+
+
 @app.get("/api/sr-zones/{ticker}")
 async def get_sr_zones(ticker: str):
     """S/R zones for a ticker from the last scan (pre-computed, instant)."""
@@ -424,6 +442,14 @@ async def get_chart_data(ticker: str):
     # S/R zones from latest scan (pre-computed)
     zones = await get_sr_zones_for_ticker_from_db(DB_PATH, sym)
 
+    # Detect trendline (fresh computation for chart display)
+    trendline = None
+    try:
+        loop = asyncio.get_event_loop()
+        trendline = await loop.run_in_executor(None, detect_trendline, sym, df)
+    except Exception as exc:
+        log.warning("Trendline detection failed %s: %s", sym, exc)
+
     return {
         "ticker": sym,
         "candles": candles,
@@ -432,6 +458,7 @@ async def get_chart_data(ticker: str):
         "sma50": _series(df.index, sma50),
         "cci": _series(df.index, cci20, dec=1),
         "sr_zones": zones,
+        "trendline": trendline,
     }
 
 
@@ -496,6 +523,10 @@ async def _enrich_trade(trade: Dict) -> Dict:
         pl_d = round((lc - ep) * qty, 2)
         pl_p = round((lc / ep - 1) * 100, 2) if ep > 0 else 0.0
 
+        # Trailing stop: rises with EMA20 when in profit; stays at original SL otherwise
+        trailing_stop = max(float(trade["stop_loss"]), l20) if lc > trade["entry_price"] else float(trade["stop_loss"])
+        is_risk_free = trailing_stop > trade["entry_price"]
+
         result.update({
             "current_price": round(lc, 2),
             "pl_dollar":     pl_d,
@@ -503,6 +534,8 @@ async def _enrich_trade(trade: Dict) -> Dict:
             "ema8":          round(l8, 2),
             "ema20":         round(l20, 2),
             "health":        health,
+            "trailing_stop": round(trailing_stop, 2),
+            "is_risk_free":  is_risk_free,
         })
     except Exception as exc:
         log.warning("Trade enrichment failed %s: %s", trade["ticker"], exc)

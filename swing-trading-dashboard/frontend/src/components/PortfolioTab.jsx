@@ -147,6 +147,7 @@ export default function PortfolioTab({ onTickerClick }) {
                   <th>P/L $</th>
                   <th>P/L %</th>
                   <th>Stop $</th>
+                  <th>Trail $</th>
                   <th>Target $</th>
                   <th style={{ textAlign: 'center' }}>Health</th>
                   <th style={{ textAlign: 'center' }}>Act</th>
@@ -202,6 +203,14 @@ export default function PortfolioTab({ onTickerClick }) {
 
                       {/* Stop */}
                       <td style={{ color: 'var(--halt)' }}>{fmt2(t.stop_loss)}</td>
+
+                      {/* Trailing Stop — blue when risk-free */}
+                      <td style={{ color: t.is_risk_free ? '#00C8FF' : 'var(--halt)', fontWeight: t.is_risk_free ? 700 : 400 }}>
+                        {fmt2(t.trailing_stop)}
+                        {t.is_risk_free && (
+                          <span style={{ fontSize: 7, marginLeft: 4, color: '#00C8FF', opacity: 0.8 }}>RF</span>
+                        )}
+                      </td>
 
                       {/* Target */}
                       <td style={{ color: 'var(--go)' }}>{fmt2(t.target)}</td>

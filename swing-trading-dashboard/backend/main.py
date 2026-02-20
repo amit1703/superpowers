@@ -261,15 +261,26 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                 rs_blue_dot = False
 
                 if spy_df_full is not None:
-                    rs_line = await loop.run_in_executor(
-                        None, calculate_rs_line, df, spy_df_full
-                    )
-                    if rs_line and len(rs_line) >= 252:
-                        rs_ratio = float(rs_line[-1])
-                        rs_52w_high = float(max(rs_line))
-                        rs_blue_dot = await loop.run_in_executor(
-                            None, detect_rs_blue_dot, rs_line
+                    try:
+                        rs_line = await loop.run_in_executor(
+                            None, calculate_rs_line, df, spy_df_full
                         )
+                        if rs_line and len(rs_line) >= 252:
+                            # Use .item() to safely convert numpy scalars to Python floats
+                            rs_today = rs_line[-1]
+                            rs_ratio = float(rs_today.item() if hasattr(rs_today, 'item') else rs_today)
+
+                            rs_max = max(rs_line)
+                            rs_52w_high = float(rs_max.item() if hasattr(rs_max, 'item') else rs_max)
+
+                            rs_blue_dot = await loop.run_in_executor(
+                                None, detect_rs_blue_dot, rs_line
+                            )
+                    except Exception as rs_exc:
+                        log.warning("RS calculation failed for %s: %s", ticker, rs_exc)
+                        rs_ratio = 0.0
+                        rs_52w_high = 0.0
+                        rs_blue_dot = False
 
                 # Engine 1: S/R zones
                 zones: List[Dict] = await loop.run_in_executor(

@@ -250,8 +250,17 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
             nonlocal vcp_count, pb_count
 
             try:
+                # ── Data Integrity Check ────────────────────────────────────
+                # Skip tickers with empty/delisted data immediately
                 df = await _fetch(ticker)
                 if df is None or len(df) < 60:
+                    log.debug("Skipped %s: insufficient data", ticker)
+                    return
+
+                # Check for empty Close column or all-NaN values
+                close_col = "Adj Close" if "Adj Close" in df.columns else "Close"
+                if close_col not in df.columns or df[close_col].isna().all():
+                    log.debug("Skipped %s: no valid price data", ticker)
                     return
 
                 # ── RS Line Calculation ────────────────────────────────────
@@ -295,6 +304,16 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                     rs_ratio, rs_52w_high, rs_blue_dot
                 )
                 if vcp:
+                    # Sanitize VCP output: ensure all numeric fields are proper floats
+                    try:
+                        vcp["entry"] = float(vcp.get("entry", 0.0))
+                        vcp["stop_loss"] = float(vcp.get("stop_loss", 0.0))
+                        vcp["take_profit"] = float(vcp.get("take_profit", 0.0))
+                        vcp["rr"] = float(vcp.get("rr", 2.0))
+                    except (ValueError, TypeError) as conv_err:
+                        log.warning("VCP conversion failed for %s: %s", ticker, conv_err)
+                        return
+
                     # Add sector to setup
                     vcp["sector"] = SECTORS.get(ticker, "Unknown")
                     await save_setup(DB_PATH, scan_ts, vcp)
@@ -305,33 +324,69 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
 
                 else:
                     # Only check near-breakout if not already a full setup
-                    tl = await loop.run_in_executor(None, detect_trendline, ticker, df)
-                    near = await loop.run_in_executor(
-                        None, scan_near_breakout, ticker, df, zones, tl
-                    )
-                    if near:
-                        near["sector"] = SECTORS.get(ticker, "Unknown")
-                        near["rs_blue_dot"] = rs_blue_dot
-                        await save_setup(DB_PATH, scan_ts, near)
-                        log.info("  NEAR     %-6s  dist=%.1f%%", ticker, near["distance_pct"])
+                    # Wrap entire near-breakout logic in try-except for robustness
+                    try:
+                        tl = await loop.run_in_executor(None, detect_trendline, ticker, df)
+                        near = await loop.run_in_executor(
+                            None, scan_near_breakout, ticker, df, zones, tl
+                        )
+                        if near:
+                            # Sanitize near-breakout output: ensure numeric fields are proper floats
+                            try:
+                                near["entry"] = float(near.get("entry", 0.0))
+                                near["distance_pct"] = float(near.get("distance_pct", 0.0))
+                            except (ValueError, TypeError) as conv_err:
+                                log.warning("Near-breakout conversion failed for %s: %s", ticker, conv_err)
+                                return
+
+                            near["sector"] = SECTORS.get(ticker, "Unknown")
+                            near["rs_blue_dot"] = rs_blue_dot
+                            await save_setup(DB_PATH, scan_ts, near)
+                            log.info("  NEAR     %-6s  dist=%.1f%%", ticker, near["distance_pct"])
+                    except Exception as near_exc:
+                        log.warning("Near-breakout check failed for %s: %s", ticker, near_exc)
+                        # Continue to pullback checks even if near-breakout fails
 
                 # Engine 3: Tactical pullback (strict, then relaxed)
                 pb = await loop.run_in_executor(None, scan_pullback, ticker, df, zones)
                 if pb:
+                    # Sanitize pullback output
+                    try:
+                        pb["entry"] = float(pb.get("entry", 0.0))
+                        pb["stop_loss"] = float(pb.get("stop_loss", 0.0))
+                        pb["take_profit"] = float(pb.get("take_profit", 0.0))
+                        pb["rr"] = float(pb.get("rr", 2.0))
+                    except (ValueError, TypeError) as conv_err:
+                        log.warning("Pullback conversion failed for %s: %s", ticker, conv_err)
+                        return
+
                     pb["sector"] = SECTORS.get(ticker, "Unknown")
                     await save_setup(DB_PATH, scan_ts, pb)
                     pb_count += 1
                     log.info("  PULLBACK %-6s  entry=%.2f", ticker, pb["entry"])
                 else:
                     # Only check relaxed if no strict pullback found
-                    pb_relaxed = await loop.run_in_executor(
-                        None, scan_relaxed_pullback, ticker, df, zones
-                    )
-                    if pb_relaxed:
-                        pb_relaxed["sector"] = SECTORS.get(ticker, "Unknown")
-                        await save_setup(DB_PATH, scan_ts, pb_relaxed)
-                        pb_count += 1
-                        log.info("  PULLBACK %-6s  entry=%.2f (relaxed)", ticker, pb_relaxed["entry"])
+                    try:
+                        pb_relaxed = await loop.run_in_executor(
+                            None, scan_relaxed_pullback, ticker, df, zones
+                        )
+                        if pb_relaxed:
+                            # Sanitize relaxed pullback output
+                            try:
+                                pb_relaxed["entry"] = float(pb_relaxed.get("entry", 0.0))
+                                pb_relaxed["stop_loss"] = float(pb_relaxed.get("stop_loss", 0.0))
+                                pb_relaxed["take_profit"] = float(pb_relaxed.get("take_profit", 0.0))
+                                pb_relaxed["rr"] = float(pb_relaxed.get("rr", 2.0))
+                            except (ValueError, TypeError) as conv_err:
+                                log.warning("Relaxed pullback conversion failed for %s: %s", ticker, conv_err)
+                                return
+
+                            pb_relaxed["sector"] = SECTORS.get(ticker, "Unknown")
+                            await save_setup(DB_PATH, scan_ts, pb_relaxed)
+                            pb_count += 1
+                            log.info("  PULLBACK %-6s  entry=%.2f (relaxed)", ticker, pb_relaxed["entry"])
+                    except Exception as pb_rel_exc:
+                        log.warning("Relaxed pullback check failed for %s: %s", ticker, pb_rel_exc)
 
             except Exception as exc:
                 log.error("Error processing %s: %s", ticker, exc)

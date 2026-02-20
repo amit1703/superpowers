@@ -30,7 +30,7 @@ export default function WatchlistPanel({ items, selectedTicker, onSelectTicker, 
           {items.map((item) => {
             const isSelected = selectedTicker === item.ticker
             const isTdl = item.pattern_type === 'TDL'
-            const hasRsBlueDot = item.rs_blue_dot === true
+            const hasRsBlueDot = !!item.rs_blue_dot
             return (
               <div
                 key={item.ticker}
@@ -51,8 +51,13 @@ export default function WatchlistPanel({ items, selectedTicker, onSelectTicker, 
                         style={{ color: isSelected ? 'var(--accent)' : 'var(--text)' }}>
                     {item.ticker}
                   </span>
+                  {/* 8px for star indicator - slightly larger than badge text (7px) for visibility */}
                   {hasRsBlueDot && (
-                    <span style={{ color: '#00C8FF', fontSize: '8px' }}>⭐</span>
+                    <span
+                      style={{ color: 'var(--blue)', fontSize: '8px' }}
+                      aria-label="RS Blue Dot - institutional accumulation signal">
+                      ⭐
+                    </span>
                   )}
                 </div>
 

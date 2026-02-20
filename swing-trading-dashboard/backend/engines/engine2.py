@@ -266,14 +266,15 @@ def scan_vcp(
         sma50 = _sma(close, 50)
         atr14 = _atr(high, low, close, 14)
 
-        lc   = float(close.iloc[-1])
-        lh   = float(high.iloc[-1])
-        ll   = float(low.iloc[-1])
-        l8   = float(ema8.iloc[-1])
-        l20  = float(ema20.iloc[-1])
-        l50  = float(sma50.iloc[-1])
-        latr = float(atr14.iloc[-1])
-        lvol = float(volume.iloc[-1])
+        # Extract scalars and use .item() for numpy types to avoid Series comparison errors
+        lc   = float(close.iloc[-1].item() if hasattr(close.iloc[-1], 'item') else close.iloc[-1])
+        lh   = float(high.iloc[-1].item() if hasattr(high.iloc[-1], 'item') else high.iloc[-1])
+        ll   = float(low.iloc[-1].item() if hasattr(low.iloc[-1], 'item') else low.iloc[-1])
+        l8   = float(ema8.iloc[-1].item() if hasattr(ema8.iloc[-1], 'item') else ema8.iloc[-1])
+        l20  = float(ema20.iloc[-1].item() if hasattr(ema20.iloc[-1], 'item') else ema20.iloc[-1])
+        l50  = float(sma50.iloc[-1].item() if hasattr(sma50.iloc[-1], 'item') else sma50.iloc[-1])
+        latr = float(atr14.iloc[-1].item() if hasattr(atr14.iloc[-1], 'item') else atr14.iloc[-1])
+        lvol = float(volume.iloc[-1].item() if hasattr(volume.iloc[-1], 'item') else volume.iloc[-1])
 
         if any(np.isnan(v) for v in [lc, lh, ll, l8, l20, l50, latr]):
             return None
@@ -284,19 +285,27 @@ def scan_vcp(
 
         # ── Shared: Volume SMA ────────────────────────────────────────────
         vol_sma50 = volume.rolling(50).mean()
-        if pd.isna(vol_sma50.iloc[-1]) or float(vol_sma50.iloc[-1]) <= 0:
+        vol_sma_val = vol_sma50.iloc[-1]
+        if pd.isna(vol_sma_val):
+            return None
+        vol_sma_scalar = float(vol_sma_val.item() if hasattr(vol_sma_val, 'item') else vol_sma_val)
+        if vol_sma_scalar <= 0:
             return None
 
-        avg_vol        = float(vol_sma50.iloc[-1])
+        avg_vol        = vol_sma_scalar
         is_vol_surge   = lvol >= 1.5 * avg_vol      # ≥150 % of 50-day avg
         volume_ratio   = round(lvol / avg_vol, 2)
 
         # ── Shared: Stock 3-month relative strength ────────────────────────
         lb63 = min(63, len(close) - 1)
-        stock_3m_return = (
-            float(close.iloc[-1]) / float(close.iloc[-lb63]) - 1
-            if lb63 > 10 else 0.0
-        )
+        if lb63 > 10:
+            close_last = close.iloc[-1]
+            close_past = close.iloc[-lb63]
+            close_last_scalar = float(close_last.item() if hasattr(close_last, 'item') else close_last)
+            close_past_scalar = float(close_past.item() if hasattr(close_past, 'item') else close_past)
+            stock_3m_return = close_last_scalar / close_past_scalar - 1
+        else:
+            stock_3m_return = 0.0
         rs_vs_spy = round(stock_3m_return - spy_3m_return, 4)
 
         # ── PATH B — Confirmed Breakout ───────────────────────────────────
@@ -502,8 +511,10 @@ def scan_vcp(
         if len(tr) < 26:
             return None
 
-        last5_tr  = float(tr.iloc[-5:].mean())
-        prev20_tr = float(tr.iloc[-25:-5].mean())
+        last5_tr_val = tr.iloc[-5:].mean()
+        prev20_tr_val = tr.iloc[-25:-5].mean()
+        last5_tr  = float(last5_tr_val.item() if hasattr(last5_tr_val, 'item') else last5_tr_val)
+        prev20_tr = float(prev20_tr_val.item() if hasattr(prev20_tr_val, 'item') else prev20_tr_val)
         if last5_tr >= prev20_tr:
             return None
 
@@ -532,7 +543,8 @@ def scan_vcp(
             return None
 
         # ── A4. Volume dry-up ─────────────────────────────────────────────
-        last3_vol = float(volume.iloc[-3:].mean())
+        last3_vol_val = volume.iloc[-3:].mean()
+        last3_vol = float(last3_vol_val.item() if hasattr(last3_vol_val, 'item') else last3_vol_val)
         is_dry = last3_vol < avg_vol
 
         # ── A5. Engine 1 resistance proximity ────────────────────────────

@@ -377,6 +377,56 @@ def scan_vcp(
                     "trendline":          trendline_data,
                 }
 
+        # ── PATH D — KDE Horizontal Breakout ─────────────────────────────────
+        # Simple breakout: price above resistance zone with volume + RS gate
+        # Only checked if no earlier paths matched
+
+        highest_res = None
+        highest_level = 0.0
+        for z in resistance_zones:
+            if z["level"] > highest_level:
+                highest_level = z["level"]
+                highest_res = z
+
+        if highest_res is not None:
+            upper = highest_res["upper"]
+            pct_above_upper = (lc - upper) / upper if upper > 0 else 0.0
+
+            # Check: 0.1% to 2.5% above resistance + volume ≥115% + RS ≥0
+            is_kde_breakout = (
+                0.001 <= pct_above_upper <= 0.025 and
+                lvol >= 1.15 * avg_vol and
+                rs_vs_spy >= 0
+            )
+
+            if is_kde_breakout:
+                entry      = round(lh * 1.001, 2)
+                stop_base  = min(ll, highest_res["lower"])
+                stop_loss  = round(stop_base - 0.2 * latr, 2)
+                risk       = entry - stop_loss
+
+                if risk > 0 and risk <= entry * 0.15:
+                    take_profit = round(entry + 2.0 * risk, 2)
+                    return {
+                        "ticker":             ticker,
+                        "setup_type":         "VCP",
+                        "entry":              entry,
+                        "stop_loss":          stop_loss,
+                        "take_profit":        take_profit,
+                        "rr":                 2.0,
+                        "setup_date":         str(data.index[-1].date()),
+                        "is_breakout":        True,
+                        "is_vol_surge":       lvol >= 1.5 * avg_vol,
+                        "volume_ratio":       volume_ratio,
+                        "resistance_level":   highest_res["level"],
+                        "breakout_pct":       round(pct_above_upper * 100, 2),
+                        "rs_vs_spy":          rs_vs_spy,
+                        "tr_contraction_pct": None,
+                        "is_trendline_breakout": False,
+                        "is_kde_breakout":    True,
+                        "trendline":          None,
+                    }
+
         # ── PATH A — DRY (Coiled Spring) ──────────────────────────────────
 
         # ── A2. True Range contraction ────────────────────────────────────

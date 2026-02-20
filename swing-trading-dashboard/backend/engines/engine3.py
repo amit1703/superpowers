@@ -231,7 +231,12 @@ def scan_relaxed_pullback(
         entry = round(lh * 1.001, 2)
 
         support_zones = [z for z in sr_zones if z["type"] == "SUPPORT"]
+        # Use lowest (most defensive) support level for relaxed pullbacks
         support_level = min([z["level"] for z in support_zones]) if support_zones else l50
+
+        # Validate support level is actually below current price
+        if support_level >= lc:
+            return None
 
         stop_base = min(ll, support_level)
         stop_loss = round(stop_base - 0.2 * latr, 2)
@@ -250,8 +255,11 @@ def scan_relaxed_pullback(
             "take_profit": take_profit,
             "rr": 2.0,
             "setup_date": str(data.index[-1].date()),
-            "cci_today": round(cci_today, 1),
-            "cci_yesterday": round(cci_prev, 1),
+            "cci_today": round(cci_today, 2),
+            "cci_yesterday": round(cci_prev, 2),
+            "support_level": support_level,
+            "ema8": round(l8, 2),
+            "ema20": round(l20, 2),
             "is_relaxed": True,
         }
 

@@ -20,7 +20,7 @@ from engines.engine5 import (
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
-def make_cup_handle_df(n_total=150, cup_depth=0.20, handle_pct=0.08):
+def make_cup_handle_df(n_total=110, cup_depth=0.20, handle_pct=0.08):
     """
     Build a synthetic DataFrame with a clear cup & handle pattern.
     Structure: 30 bars uptrend → 40-bar cup → 40-bar recovery → 20-bar handle → 20 bars near pivot
@@ -79,7 +79,7 @@ def make_flat_base_df(n_total=100, base_depth=0.08, base_days=35):
         t = i / base_days
         close[trend_bars + i] = base_start * (1 - base_depth * 0.25 * np.sin(2 * np.pi * t))
 
-    close[-1] = base_start * 0.99
+    close[-1] = base_start * 0.996
 
     high = close * 1.005
     low = close * 0.995

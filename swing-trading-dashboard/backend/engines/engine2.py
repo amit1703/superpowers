@@ -42,7 +42,7 @@ from indicators import ema as _ema, sma as _sma, atr as _atr, true_range as _tr
 # Public API
 # ---------------------------------------------------------------------------
 
-def detect_trendline(
+def _detect_descending_trendline(
     ticker: str,
     df: pd.DataFrame,
 ) -> Optional[Dict]:
@@ -57,7 +57,7 @@ def detect_trendline(
     5. Generate {time, value} series from peak1 to today
 
     Returns dict with keys: series, peak1, peak2, slope, touches
-    Or None if no valid trendline found.
+    Or None if no valid descending trendline found.
     """
     try:
         data = _prep(df)
@@ -144,6 +144,151 @@ def detect_trendline(
         }
 
     except Exception as exc:  # noqa: BLE001
+        print(f"[_detect_descending_trendline] {ticker}: {exc}")
+        return None
+
+
+def _detect_ascending_trendline(
+    ticker: str,
+    df: pd.DataFrame,
+) -> Optional[Dict]:
+    """
+    Detect an ascending trendline from the last 120 days of Low prices.
+
+    Algorithm (mirrors descending):
+    1. Find swing lows using find_peaks (inverted)
+    2. Take 2 most prominent lows
+    3. Fit line through them (compute slope)
+    4. Validate: positive slope, ≥2 touches within 0.8%
+    5. Generate {time, value} series from trough1 to today
+
+    Returns dict with keys: series, trough1, trough2, slope, touches
+    Or None if no valid ascending trendline found.
+    """
+    try:
+        data = _prep(df)
+        if data is None or len(data) < 30:
+            return None
+
+        low = data["Low"].values
+        dates = data.index
+
+        # Use last 120 days for trough detection
+        lookback = min(120, len(low))
+        lows = low[-lookback:]
+        date_slice = dates[-lookback:]
+
+        # Find swing lows (inverted find_peaks: negate to find minima)
+        prominence_threshold = float(np.std(lows)) * 0.3
+        # Negate lows to find valleys as peaks
+        trough_idx, props = find_peaks(-lows, prominence=prominence_threshold, distance=5)
+
+        if len(trough_idx) < 2:
+            return None
+
+        # Sort by prominence (descending), take top 2, then sort by time
+        prominences = props["prominences"]
+        sorted_order = np.argsort(prominences)[::-1]
+        top2_raw = trough_idx[sorted_order[:2]]
+        top2 = sorted(top2_raw.tolist())  # Sort by time index
+
+        t1_idx, t2_idx = top2[0], top2[1]
+        t1_price = float(lows[t1_idx])
+        t2_price = float(lows[t2_idx])
+        t1_date = date_slice[t1_idx]
+        t2_date = date_slice[t2_idx]
+
+        # Compute slope (price per day)
+        day_diff = (t2_date - t1_date).days
+        if day_diff <= 0:
+            return None
+
+        slope = (t2_price - t1_price) / day_diff
+
+        # Validate: must be ascending (positive slope)
+        if slope <= 0:
+            return None
+
+        # Count touches: bars within 0.8% of trendline value
+        touches = 0
+        for i in range(len(lows)):
+            days_from_t1 = (date_slice[i] - t1_date).days
+            trendline_val = t1_price + slope * days_from_t1
+            if trendline_val > 0 and abs(lows[i] - trendline_val) / trendline_val <= 0.008:
+                touches += 1
+
+        if touches < 2:
+            return None
+
+        # Generate series at actual trading dates from t1 to end of df
+        series = []
+        for date in data.index:
+            if date < t1_date:
+                continue
+            days_from_t1 = (date - t1_date).days
+            val = t1_price + slope * days_from_t1
+            if val > 0:
+                series.append({
+                    "time": date.strftime("%Y-%m-%d"),
+                    "value": round(float(val), 2)
+                })
+
+        if not series:
+            return None
+
+        return {
+            "series": series,
+            "trough1": {
+                "date": t1_date.strftime("%Y-%m-%d"),
+                "price": round(t1_price, 2),
+            },
+            "trough2": {
+                "date": t2_date.strftime("%Y-%m-%d"),
+                "price": round(t2_price, 2),
+            },
+            "slope": round(slope, 6),
+            "touches": touches,
+        }
+
+    except Exception as exc:  # noqa: BLE001
+        print(f"[_detect_ascending_trendline] {ticker}: {exc}")
+        return None
+
+
+def detect_trendline(
+    ticker: str,
+    df: pd.DataFrame,
+) -> Optional[Dict]:
+    """
+    Detect both descending (resistance) and ascending (support) trendlines.
+
+    Returns unified structure with optional descending and ascending trendlines,
+    or None if no trendlines found at all.
+
+    Returns:
+        {
+            "descending": {...descending trendline dict...},  # or None
+            "ascending": {...ascending trendline dict...}     # or None
+        }
+    Or None if both are None.
+    """
+    try:
+        # Detect descending (resistance)
+        descending = _detect_descending_trendline(ticker, df)
+
+        # Detect ascending (support)
+        ascending = _detect_ascending_trendline(ticker, df)
+
+        # Return None only if both are None
+        if descending is None and ascending is None:
+            return None
+
+        return {
+            "descending": descending,
+            "ascending": ascending,
+        }
+
+    except Exception as exc:  # noqa: BLE001
         print(f"[detect_trendline] {ticker}: {exc}")
         return None
 
@@ -189,8 +334,8 @@ def scan_near_breakout(
                         best_type = "KDE"
 
         # Check descending trendline (takes priority if closer)
-        if trendline and trendline.get("series"):
-            tl_today = trendline["series"][-1]["value"]
+        if trendline and trendline.get("descending") and trendline["descending"].get("series"):
+            tl_today = trendline["descending"]["series"][-1]["value"]
             if tl_today > lc:
                 dist = (tl_today - lc) / tl_today
                 if dist <= PROXIMITY_PCT:

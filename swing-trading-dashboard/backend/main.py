@@ -373,6 +373,9 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                 if zones:
                     await save_sr_zones(DB_PATH, scan_ts, ticker, zones)
 
+                # Detect trendline early (used by VCP follow-up, near-breakout, and pullback)
+                tl = await loop.run_in_executor(None, detect_trendline, ticker, df)
+
                 # Engine 2: VCP breakout (with RS parameters for Path E)
                 vcp = await loop.run_in_executor(
                     None, scan_vcp, ticker, df, zones, spy_3m_return,
@@ -398,9 +401,6 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                     log.info("  %s      %-6s  entry=%.2f", setup_type, ticker, vcp["entry"])
 
                 else:
-                    # Detect trendline once (used by both near-breakout and pullback)
-                    tl = await loop.run_in_executor(None, detect_trendline, ticker, df)
-
                     # Only check near-breakout if not already a full setup
                     # Wrap entire near-breakout logic in try-except for robustness
                     try:

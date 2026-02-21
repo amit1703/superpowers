@@ -216,8 +216,33 @@ def _quality_score(
     rs_vs_spy: float,
     rs_blue_dot: bool,
 ) -> int:
-    """Compute quality score 0–100 from four equally-weighted factors."""
-    raise NotImplementedError
+    """Compute quality score 0–100 from four equally-weighted factors (25 pts each)."""
+    # RS vs SPY: outperformance >= 5% = full 25 pts
+    rs_pts = min(25.0, max(0.0, (rs_vs_spy / 0.05) * 25.0))
+
+    # Base tightness: depth <= 8% = 25 pts, scales to 0 at max_depth_pct
+    min_depth = 0.08
+    if depth_pct <= min_depth:
+        tight_pts = 25.0
+    elif depth_pct >= max_depth_pct:
+        tight_pts = 0.0
+    else:
+        ratio = (depth_pct - min_depth) / (max_depth_pct - min_depth)
+        tight_pts = (1.0 - ratio) * 25.0
+
+    # Volume dry-up: vol_dry_pct <= 30% of avg = 25 pts, scales to 0 at 1.0+
+    max_dry = 0.3
+    if vol_dry_pct <= max_dry:
+        vol_pts = 25.0
+    elif vol_dry_pct >= 1.0:
+        vol_pts = 0.0
+    else:
+        vol_pts = ((1.0 - vol_dry_pct) / (1.0 - max_dry)) * 25.0
+
+    # RS blue dot: 25 pts if True
+    rs_high_pts = 25.0 if rs_blue_dot else 0.0
+
+    return int(round(rs_pts + tight_pts + vol_pts + rs_high_pts))
 
 
 def _prep(df: pd.DataFrame) -> Optional[pd.DataFrame]:

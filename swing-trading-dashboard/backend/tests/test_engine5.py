@@ -181,3 +181,37 @@ class TestFindHandle:
             handle = _find_handle(close, volume, cup, vol_sma50)
             if handle is not None:
                 assert handle["pullback_pct"] <= 0.15
+
+
+class TestQualityScore:
+    def test_perfect_score(self):
+        """All factors maxed out → 100."""
+        score = _quality_score(
+            depth_pct=0.05,     # very tight (< 8%)
+            max_depth_pct=0.35,
+            vol_dry_pct=0.3,    # 30% of avg (heavy dry-up)
+            rs_vs_spy=0.10,     # +10% vs SPY (above 5% threshold)
+            rs_blue_dot=True,
+        )
+        assert score == 100
+
+    def test_zero_score(self):
+        """All factors at worst → 0."""
+        score = _quality_score(
+            depth_pct=0.35,     # at max depth (0 tightness pts)
+            max_depth_pct=0.35,
+            vol_dry_pct=1.5,    # volume above avg (0 vol pts)
+            rs_vs_spy=-0.10,    # underperforming SPY (0 RS pts)
+            rs_blue_dot=False,
+        )
+        assert score == 0
+
+    def test_blue_dot_adds_25(self):
+        """RS blue dot adds exactly 25 pts."""
+        s1 = _quality_score(0.35, 0.35, 1.5, -0.10, False)
+        s2 = _quality_score(0.35, 0.35, 1.5, -0.10, True)
+        assert s2 - s1 == 25
+
+    def test_score_in_range(self):
+        score = _quality_score(0.15, 0.35, 0.70, 0.02, False)
+        assert 0 <= score <= 100

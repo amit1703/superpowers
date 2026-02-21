@@ -366,6 +366,111 @@ def scan_near_breakout(
         return None
 
 
+def _calculate_base_depth(
+    high: pd.Series,
+    low: pd.Series,
+    lookback: int = 30,
+) -> tuple[float, bool]:
+    """
+    Calculate the maximum drawdown percentage of the VCP base.
+
+    Parameters
+    ----------
+    high : pd.Series
+        High prices (last lookback bars)
+    low : pd.Series
+        Low prices (last lookback bars)
+    lookback : int
+        Number of bars to analyze for base structure (default 30)
+
+    Returns
+    -------
+    (base_depth_pct, is_valid)
+        base_depth_pct: Percentage drawdown from high to low in base
+        is_valid: True if depth is within professional range (10-40%)
+    """
+    try:
+        if len(high) < lookback or len(low) < lookback:
+            return 0.0, False
+
+        recent_high = high.iloc[-lookback:].max()
+        recent_low = low.iloc[-lookback:].min()
+
+        if recent_high <= 0:
+            return 0.0, False
+
+        base_depth_pct = ((recent_high - recent_low) / recent_high) * 100
+
+        # Professional VCP: base depth should be 10-40%
+        is_valid = 10.0 <= base_depth_pct <= 40.0
+
+        return round(base_depth_pct, 2), is_valid
+
+    except Exception:
+        return 0.0, False
+
+
+def _count_contractions(
+    tr_series: pd.Series,
+    lookback: int = 25,
+) -> tuple[int, str, bool]:
+    """
+    Count individual volatility contractions and identify pattern (3T, 4T, 5T, etc.).
+
+    Parameters
+    ----------
+    tr_series : pd.Series
+        True Range series (volatility)
+    lookback : int
+        Number of bars to analyze (default 25)
+
+    Returns
+    -------
+    (contraction_count, pattern, is_progressive)
+        contraction_count: Number of contractions detected
+        pattern: "3T", "4T", "5T", etc. (or "NONE" if < 3)
+        is_progressive: True if each contraction is tighter than previous
+    """
+    try:
+        if len(tr_series) < lookback + 5:
+            return 0, "NONE", False
+
+        tr_clean = tr_series.dropna()
+        if len(tr_clean) < lookback + 5:
+            return 0, "NONE", False
+
+        # Get the baseline: average TR from 20 bars ago
+        baseline_tr = tr_clean.iloc[-lookback:-5].mean()
+
+        # Count recent bars that are contractions (below baseline)
+        recent_bars = tr_clean.iloc[-5:].values
+        contractions = []
+
+        for i, tr_val in enumerate(recent_bars):
+            if tr_val < baseline_tr:
+                contractions.append((i, tr_val))
+
+        contraction_count = len(contractions)
+
+        # Check if contractions are progressively tighter
+        is_progressive = False
+        if contraction_count >= 3:
+            # Each contraction should be tighter (smaller TR) than previous
+            tr_values = [v for _, v in contractions]
+            is_progressive = all(tr_values[i] >= tr_values[i+1] for i in range(len(tr_values)-1))
+
+        # Map count to pattern name (3T, 4T, 5T, etc.)
+        if contraction_count < 3:
+            pattern = "NONE"
+        else:
+            pattern = f"{contraction_count}T"
+
+        return contraction_count, pattern, is_progressive
+
+    except Exception:
+        return 0, "NONE", False
+
+
 def scan_vcp(
     ticker: str,
     df: pd.DataFrame,
@@ -410,6 +515,7 @@ def scan_vcp(
         ema8  = _ema(close, 8)
         ema20 = _ema(close, 20)
         sma50 = _sma(close, 50)
+        sma200 = _sma(close, 200)  # Professional VCP: long-term trend filter
         atr14 = _atr(high, low, close, 14)
 
         # Extract scalars and use .item() for numpy types to avoid Series comparison errors
@@ -419,14 +525,16 @@ def scan_vcp(
         l8   = float(ema8.iloc[-1].item() if hasattr(ema8.iloc[-1], 'item') else ema8.iloc[-1])
         l20  = float(ema20.iloc[-1].item() if hasattr(ema20.iloc[-1], 'item') else ema20.iloc[-1])
         l50  = float(sma50.iloc[-1].item() if hasattr(sma50.iloc[-1], 'item') else sma50.iloc[-1])
+        l200 = float(sma200.iloc[-1].item() if hasattr(sma200.iloc[-1], 'item') else sma200.iloc[-1])
         latr = float(atr14.iloc[-1].item() if hasattr(atr14.iloc[-1], 'item') else atr14.iloc[-1])
         lvol = float(volume.iloc[-1].item() if hasattr(volume.iloc[-1], 'item') else volume.iloc[-1])
 
-        if any(np.isnan(v) for v in [lc, lh, ll, l8, l20, l50, latr]):
+        if any(np.isnan(v) for v in [lc, lh, ll, l8, l20, l50, l200, latr]):
             return None
 
-        # ── Shared: Trend filter (both paths) ────────────────────────────
-        if not (l8 > l20 and lc > l50):
+        # ── Shared: Professional Trend filter (both paths) ────────────────
+        # FEATURE 1: Strict trend template - price above both 200 SMA and 50 SMA
+        if not (l8 > l20 and lc > l50 and lc > l200):
             return None
 
         # ── Shared: Volume SMA ────────────────────────────────────────────
@@ -453,6 +561,13 @@ def scan_vcp(
         else:
             stock_3m_return = 0.0
         rs_vs_spy = round(stock_3m_return - spy_3m_return, 4)
+
+        # ── FEATURE 2: Calculate base depth (professional VCP quality gate) ──
+        base_depth_pct, is_valid_depth = _calculate_base_depth(high, low, lookback=30)
+
+        # ── FEATURE 3: Count volatility contractions (3T, 4T, 5T pattern) ────
+        tr = _tr(high, low, close).dropna()
+        contraction_count, contraction_pattern, is_progressive = _count_contractions(tr, lookback=25)
 
         # ── PATH B — Confirmed Breakout ───────────────────────────────────
         # (checked first — higher conviction, takes priority)
@@ -498,7 +613,7 @@ def scan_vcp(
                         (lc - bk_zone["upper"]) / bk_zone["upper"] * 100, 2
                     ),
                     "rs_vs_spy":          rs_vs_spy,
-                    "tr_contraction_pct": None,
+                    "tr_contraction_pct": round((1 - (tr.iloc[-5:].mean() / tr.iloc[-25:-5].mean())) * 100, 1) if len(tr) >= 25 else None,
                     "is_trendline_breakout": False,
                     "is_kde_breakout":    False,
                     "is_rs_lead":         False,
@@ -506,6 +621,11 @@ def scan_vcp(
                     "rs_52w_high":        rs_52w_high,
                     "rs_blue_dot":        rs_blue_dot,
                     "trendline":          None,
+                    "is_above_200sma":    True,
+                    "base_depth_pct":     base_depth_pct,
+                    "contraction_count":  contraction_count,
+                    "contraction_pattern": contraction_pattern,
+                    "is_progressive_tightening": is_progressive,
                 }
 
         # ── PATH C — Trendline Breakout ────────────────────────────────────
@@ -542,7 +662,7 @@ def scan_vcp(
                     "resistance_level":   None,
                     "breakout_pct":       None,
                     "rs_vs_spy":          rs_vs_spy,
-                    "tr_contraction_pct": None,
+                    "tr_contraction_pct": round((1 - (tr.iloc[-5:].mean() / tr.iloc[-25:-5].mean())) * 100, 1) if len(tr) >= 25 else None,
                     "is_trendline_breakout": True,
                     "is_kde_breakout":    False,
                     "is_rs_lead":         False,
@@ -550,6 +670,11 @@ def scan_vcp(
                     "rs_52w_high":        rs_52w_high,
                     "rs_blue_dot":        rs_blue_dot,
                     "trendline":          trendline_data,
+                    "is_above_200sma":    True,
+                    "base_depth_pct":     base_depth_pct,
+                    "contraction_count":  contraction_count,
+                    "contraction_pattern": contraction_pattern,
+                    "is_progressive_tightening": is_progressive,
                 }
 
         # ── PATH D — KDE Horizontal Breakout ─────────────────────────────────
@@ -596,7 +721,7 @@ def scan_vcp(
                         "resistance_level":   highest_res["level"],
                         "breakout_pct":       round(pct_above_upper * 100, 2),
                         "rs_vs_spy":          rs_vs_spy,
-                        "tr_contraction_pct": None,
+                        "tr_contraction_pct": round((1 - (tr.iloc[-5:].mean() / tr.iloc[-25:-5].mean())) * 100, 1) if len(tr) >= 25 else None,
                         "is_trendline_breakout": False,
                         "is_kde_breakout":    True,
                         "is_rs_lead":         False,
@@ -604,6 +729,11 @@ def scan_vcp(
                         "rs_52w_high":        rs_52w_high,
                         "rs_blue_dot":        rs_blue_dot,
                         "trendline":          None,
+                        "is_above_200sma":    True,
+                        "base_depth_pct":     base_depth_pct,
+                        "contraction_count":  contraction_count,
+                        "contraction_pattern": contraction_pattern,
+                        "is_progressive_tightening": is_progressive,
                     }
 
         # ── PATH E — RS Strength Breakout ────────────────────────────────────
@@ -644,7 +774,7 @@ def scan_vcp(
                         "resistance_level":   highest_res["level"],
                         "breakout_pct":       round(pct_below_upper * 100, 2),
                         "rs_vs_spy":          rs_vs_spy,
-                        "tr_contraction_pct": None,
+                        "tr_contraction_pct": round((1 - (tr.iloc[-5:].mean() / tr.iloc[-25:-5].mean())) * 100, 1) if len(tr) >= 25 else None,
                         "is_trendline_breakout": False,
                         "is_kde_breakout":    False,
                         "is_rs_lead":         True,
@@ -652,6 +782,11 @@ def scan_vcp(
                         "rs_52w_high":        rs_52w_high,
                         "rs_blue_dot":        rs_blue_dot,
                         "trendline":          None,
+                        "is_above_200sma":    True,
+                        "base_depth_pct":     base_depth_pct,
+                        "contraction_count":  contraction_count,
+                        "contraction_pattern": contraction_pattern,
+                        "is_progressive_tightening": is_progressive,
                     }
 
         # ── PATH A — DRY (Coiled Spring) ──────────────────────────────────
@@ -749,6 +884,11 @@ def scan_vcp(
             "rs_52w_high":        rs_52w_high,
             "rs_blue_dot":        rs_blue_dot,
             "trendline":          None,
+            "is_above_200sma":    True,
+            "base_depth_pct":     base_depth_pct,
+            "contraction_count":  contraction_count,
+            "contraction_pattern": contraction_pattern,
+            "is_progressive_tightening": is_progressive,
         }
 
     except Exception as exc:  # noqa: BLE001

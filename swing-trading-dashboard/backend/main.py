@@ -9,6 +9,7 @@ Endpoints
   GET  /api/setups            All setups (VCP + Pullback)
   GET  /api/setups/vcp        VCP setups only
   GET  /api/setups/pullback   Pullback setups only
+  GET  /api/setups/base       Cup & Handle + Flat Base setups only
   GET  /api/sr-zones/{ticker} S/R zones for one ticker (from last scan)
   GET  /api/chart/{ticker}    OHLCV + EMA8/20 + SMA50 + CCI20 (fresh fetch)
   GET  /api/health            Health-check
@@ -76,6 +77,7 @@ from engines.engine1 import calculate_sr_zones
 from engines.engine2 import scan_vcp, detect_trendline, scan_near_breakout
 from engines.engine3 import scan_pullback, scan_relaxed_pullback
 from engines.engine4 import calculate_rs_line, detect_rs_blue_dot, get_rs_stats
+from engines.engine5 import scan_base_pattern
 from tickers import SCAN_UNIVERSE
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -306,10 +308,11 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
         dropped_tickers: List[str] = []  # Track tickers that failed all retries
         vcp_count = 0
         pb_count = 0
+        base_count = 0
         process_start_time = time.time()
 
         async def _process(ticker: str, idx: int) -> None:
-            nonlocal vcp_count, pb_count, dropped_tickers
+            nonlocal vcp_count, pb_count, base_count, dropped_tickers
 
             try:
                 # ── Data Integrity Check ────────────────────────────────────
@@ -465,6 +468,29 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                     except Exception as pb_rel_exc:
                         log.warning("Relaxed pullback check failed for %s: %s", ticker, pb_rel_exc)
 
+                # Engine 5: Base pattern (Cup & Handle / Flat Base)
+                try:
+                    base = await loop.run_in_executor(
+                        None, scan_base_pattern, ticker, df,
+                        spy_3m_return, rs_ratio, rs_52w_high, rs_blue_dot
+                    )
+                    if base:
+                        try:
+                            base["entry"] = float(base.get("entry", 0.0))
+                            base["stop_loss"] = float(base.get("stop_loss", 0.0))
+                            base["take_profit"] = float(base.get("take_profit", 0.0))
+                            base["rr"] = float(base.get("rr", 2.0))
+                        except (ValueError, TypeError) as conv_err:
+                            log.warning("Base pattern conversion failed for %s: %s", ticker, conv_err)
+                        else:
+                            base["sector"] = SECTORS.get(ticker, "Unknown")
+                            collected_setups.append(base)
+                            base_count += 1
+                            log.info("  BASE     %-6s  %s  Q=%d  entry=%.2f",
+                                     ticker, base.get("base_type", ""), base.get("quality_score", 0), base["entry"])
+                except Exception as base_exc:
+                    log.warning("Base pattern check failed for %s: %s", ticker, base_exc)
+
             except Exception as exc:
                 log.error("Error processing %s: %s", ticker, exc)
                 # Log full traceback for debugging Series issues
@@ -480,10 +506,11 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
 
         process_time = time.time() - process_start_time
         log.info(
-            "Per-ticker processing completed  [%.1fs]  vcp=%d  pb=%d  total_setups=%d",
+            "Per-ticker processing completed  [%.1fs]  vcp=%d  pb=%d  base=%d  total_setups=%d",
             process_time,
             vcp_count,
             pb_count,
+            base_count,
             len(collected_setups),
         )
 
@@ -641,6 +668,14 @@ async def get_vcp_setups():
 async def get_pullback_setups():
     """Tactical pullback setups from the latest scan."""
     setups = await get_latest_setups(DB_PATH, setup_type="PULLBACK")
+    return {"setups": setups, "count": len(setups)}
+
+
+@app.get("/api/setups/base")
+async def get_base_setups():
+    """Cup & Handle and Flat Base setups from the latest scan."""
+    setups = await get_latest_setups(DB_PATH, setup_type="BASE")
+    setups.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
     return {"setups": setups, "count": len(setups)}
 
 

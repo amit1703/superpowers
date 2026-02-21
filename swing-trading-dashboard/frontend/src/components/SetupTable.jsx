@@ -67,6 +67,11 @@ export default function SetupTable({ title, accentColor, setups, selectedTicker,
                 const isRelaxed         = s.is_relaxed === true
                 const isRsLead          = s.is_rs_lead === true
                 const isAscendingTdl    = s.is_ascending_tdl === true
+                const isCupHandle       = s.base_type === 'CUP_HANDLE'
+                const isFlatBase        = s.base_type === 'FLAT_BASE'
+                const qualityScore      = typeof s.quality_score === 'number' ? s.quality_score : null
+                const isBaseBrk         = s.setup_type === 'BASE' && s.signal === 'BRK'
+                const isBaseDry         = s.setup_type === 'BASE' && s.signal === 'DRY'
 
                 // Row background: green tint for volume-surge rows
                 const rowStyle = isVolSurge
@@ -171,7 +176,7 @@ export default function SetupTable({ title, accentColor, setups, selectedTicker,
                             </span>
                           )}
                         </div>
-                      ) : (
+                      ) : s.setup_type === 'PULLBACK' ? (
                         /* Pullback: show CCI value + ASC-TDL badge + RLX badge */
                         <div className="flex items-center gap-1">
                           <span className="text-t-muted text-[9px]">
@@ -203,6 +208,64 @@ export default function SetupTable({ title, accentColor, setups, selectedTicker,
                               style={{ background: 'rgba(245,166,35,0.12)', color: 'var(--accent)', border: '1px solid rgba(245,166,35,0.3)', fontSize: 7 }}
                             >
                               RLX
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        /* BASE: C&H / FLAT pattern badge + BRK/DRY signal + quality score + RS+ */
+                        <div className="flex items-center gap-1 flex-wrap">
+                          {/* Pattern type badge */}
+                          {isCupHandle && (
+                            <span
+                              className="badge"
+                              style={{ background: 'rgba(38,166,154,0.12)', color: '#26a69a',
+                                       border: '1px solid rgba(38,166,154,0.35)', fontWeight: 700 }}
+                            >
+                              C&amp;H
+                            </span>
+                          )}
+                          {isFlatBase && (
+                            <span
+                              className="badge"
+                              style={{ background: 'rgba(66,165,245,0.12)', color: '#42a5f5',
+                                       border: '1px solid rgba(66,165,245,0.35)', fontWeight: 700 }}
+                            >
+                              FLAT
+                            </span>
+                          )}
+
+                          {/* BRK / DRY signal */}
+                          <span
+                            className="badge"
+                            style={isBaseBrk
+                              ? { background: 'rgba(0,200,122,0.12)', color: 'var(--go)', border: '1px solid rgba(0,200,122,0.3)', fontWeight: 700 }
+                              : { background: 'rgba(245,166,35,0.12)', color: 'var(--accent)', border: '1px solid rgba(245,166,35,0.3)', fontWeight: 700 }
+                            }
+                          >
+                            {isBaseBrk ? 'BRK' : 'DRY'}
+                          </span>
+
+                          {/* Quality score */}
+                          {qualityScore !== null && (
+                            <span
+                              className="badge"
+                              style={{ fontFamily: 'monospace', fontSize: 9,
+                                       background: 'rgba(255,255,255,0.04)', color: 'var(--t-muted)',
+                                       border: '1px solid var(--border)' }}
+                              title={`Quality score: ${qualityScore}/100`}
+                            >
+                              Q{qualityScore}
+                            </span>
+                          )}
+
+                          {/* RS+ badge */}
+                          {isRsPlus && (
+                            <span
+                              className="badge"
+                              style={{ fontSize: 7, background: 'rgba(0,200,255,0.08)', color: '#00C8FF',
+                                       border: '1px solid rgba(0,200,255,0.2)', fontWeight: 600 }}
+                            >
+                              RS+
                             </span>
                           )}
                         </div>

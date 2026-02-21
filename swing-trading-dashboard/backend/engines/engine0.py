@@ -57,8 +57,10 @@ def check_market_regime() -> Dict:
         if ema20.empty or pd.isna(ema20.iloc[-1]):
             return _error("EMA-20 calculation failed")
 
-        latest_close = float(close.iloc[-1])
-        latest_ema20 = float(ema20.iloc[-1])
+        lc_val = close.iloc[-1]
+        le_val = ema20.iloc[-1]
+        latest_close = float(lc_val.item() if hasattr(lc_val, 'item') else lc_val)
+        latest_ema20 = float(le_val.item() if hasattr(le_val, 'item') else le_val)
         is_bullish = latest_close > latest_ema20
 
         return {

@@ -467,6 +467,11 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
 
             except Exception as exc:
                 log.error("Error processing %s: %s", ticker, exc)
+                # Log full traceback for debugging Series issues
+                import traceback
+                for line in traceback.format_exc().split('\n')[:15]:  # Limit to first 15 lines
+                    if line.strip():
+                        log.debug("  %s", line)
             finally:
                 _scan_state["progress"] = idx + 1
 

@@ -52,6 +52,7 @@ from constants import (
     DAYS_3_MONTHS,
     FETCH_BACKOFF_BASE,
     FETCH_MAX_RETRIES,
+    MAX_TICKERS_PER_SCAN,
     MIN_CANDLES_FOR_ANALYSIS,
     MIN_CANDLES_FOR_RS,
     TRADING_DAYS_IN_YEAR,
@@ -79,6 +80,7 @@ from engines.engine3 import scan_pullback, scan_relaxed_pullback
 from engines.engine4 import calculate_rs_line, detect_rs_blue_dot, get_rs_stats
 from engines.engine5 import scan_base_pattern
 from tickers import SCAN_UNIVERSE
+from universe_builder import load_universe, UNIVERSE_FILE
 
 # ────────────────────────────────────────────────────────────────────────────
 # Configuration (imported from constants.py for centralized management)
@@ -92,18 +94,30 @@ logging.basicConfig(
 log = logging.getLogger("swing")
 
 # ────────────────────────────────────────────────────────────────────────────
-# Sector mapping
+# Universe & Sector loading (active_universe.json with tickers.py fallback)
 # ────────────────────────────────────────────────────────────────────────────
 
-SECTORS_FILE = "sectors.json"
+ACTIVE_UNIVERSE = SCAN_UNIVERSE  # default fallback
 SECTORS = {}
 
-try:
-    with open(SECTORS_FILE, 'r') as f:
-        SECTORS = json.load(f)
-    log.info("Loaded %d sectors from %s", len(SECTORS), SECTORS_FILE)
-except Exception as e:
-    log.warning("Could not load sectors.json: %s", e)
+_universe_result = load_universe(UNIVERSE_FILE)
+if _universe_result is not None:
+    ACTIVE_UNIVERSE, SECTORS = _universe_result
+    if len(ACTIVE_UNIVERSE) > MAX_TICKERS_PER_SCAN:
+        log.warning(
+            "Universe has %d tickers, capping to %d",
+            len(ACTIVE_UNIVERSE), MAX_TICKERS_PER_SCAN,
+        )
+        ACTIVE_UNIVERSE = ACTIVE_UNIVERSE[:MAX_TICKERS_PER_SCAN]
+    log.info("Loaded active universe: %d tickers from %s", len(ACTIVE_UNIVERSE), UNIVERSE_FILE)
+else:
+    log.info("No active_universe.json, using SCAN_UNIVERSE (%d tickers)", len(SCAN_UNIVERSE))
+    try:
+        with open("sectors.json", "r") as f:
+            SECTORS = json.load(f)
+        log.info("Loaded %d sectors from sectors.json (fallback)", len(SECTORS))
+    except Exception as e:
+        log.warning("Could not load sectors.json: %s", e)
 
 # ────────────────────────────────────────────────────────────────────────────
 # Shared state (single-process; safe with asyncio event loop)
@@ -161,77 +175,76 @@ async def _fetch(ticker: str, retry_count: int = 0) -> Optional[pd.DataFrame]:
     """
     Download daily OHLCV for one ticker with retry logic and exponential backoff.
 
-    Args:
-        ticker: Ticker symbol to fetch
-        retry_count: Current retry attempt (0 = initial, 1-3 = retries)
-
-    Returns:
-        DataFrame with OHLCV data, or None if all retries exhausted
+    Semaphore is acquired per-attempt (not held across retries) to prevent
+    deadlock when multiple tasks retry simultaneously.
     """
-    async with _semaphore:
-        loop = asyncio.get_event_loop()
-        try:
-            df = await loop.run_in_executor(
-                None,
-                lambda: yf.download(
-                    ticker,
-                    period=DATA_FETCH_PERIOD,
-                    interval="1d",
-                    auto_adjust=False,
-                    prepost=False,
-                    progress=False,
-                    threads=False,
-                ),
-            )
-
-            # Check if data is valid
-            if df is None or df.empty:
-                if retry_count < FETCH_MAX_RETRIES:
-                    backoff_delay = FETCH_BACKOFF_BASE * (2 ** retry_count)
-                    log.warning(
-                        "Fetch %s: empty/None data (attempt %d/%d), retrying in %.1fs...",
+    for attempt in range(retry_count, FETCH_MAX_RETRIES + 1):
+        need_retry = False
+        backoff_delay = 0.0
+        async with _semaphore:
+            loop = asyncio.get_event_loop()
+            try:
+                df = await loop.run_in_executor(
+                    None,
+                    lambda: yf.download(
                         ticker,
-                        retry_count + 1,
+                        period=DATA_FETCH_PERIOD,
+                        interval="1d",
+                        auto_adjust=False,
+                        prepost=False,
+                        progress=False,
+                        threads=False,
+                    ),
+                )
+
+                if df is None or df.empty:
+                    if attempt < FETCH_MAX_RETRIES:
+                        backoff_delay = FETCH_BACKOFF_BASE * (2 ** attempt)
+                        log.warning(
+                            "Fetch %s: empty/None data (attempt %d/%d), retrying in %.1fs...",
+                            ticker,
+                            attempt + 1,
+                            FETCH_MAX_RETRIES,
+                            backoff_delay,
+                        )
+                        need_retry = True
+                    else:
+                        log.warning(
+                            "Fetch DROPPED %s: empty/None data after %d retries",
+                            ticker, FETCH_MAX_RETRIES,
+                        )
+                        return None
+                else:
+                    # Flatten MultiIndex (newer yfinance versions)
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0)
+                    # Deduplicate columns (yfinance can produce duplicates)
+                    if df.columns.duplicated().any():
+                        df = df.loc[:, ~df.columns.duplicated()]
+                    return df
+
+            except Exception as exc:
+                if attempt < FETCH_MAX_RETRIES:
+                    backoff_delay = FETCH_BACKOFF_BASE * (2 ** attempt)
+                    log.warning(
+                        "Fetch %s: failed with %s (attempt %d/%d), retrying in %.1fs...",
+                        ticker,
+                        type(exc).__name__,
+                        attempt + 1,
                         FETCH_MAX_RETRIES,
                         backoff_delay,
                     )
-                    await asyncio.sleep(backoff_delay)
-                    return await _fetch(ticker, retry_count + 1)
+                    need_retry = True
                 else:
                     log.warning(
-                        "Fetch DROPPED %s: empty/None data after %d retries - ticker data unavailable",
-                        ticker,
-                        FETCH_MAX_RETRIES,
+                        "Fetch DROPPED %s: %s after %d retries",
+                        ticker, type(exc).__name__, FETCH_MAX_RETRIES,
                     )
                     return None
-
-            # Flatten MultiIndex (newer yfinance versions)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-
-            return df
-
-        except Exception as exc:
-            if retry_count < FETCH_MAX_RETRIES:
-                backoff_delay = FETCH_BACKOFF_BASE * (2 ** retry_count)
-                log.warning(
-                    "Fetch %s: failed with %s (attempt %d/%d), retrying in %.1fs...",
-                    ticker,
-                    type(exc).__name__,
-                    retry_count + 1,
-                    FETCH_MAX_RETRIES,
-                    backoff_delay,
-                )
-                await asyncio.sleep(backoff_delay)
-                return await _fetch(ticker, retry_count + 1)
-            else:
-                log.warning(
-                    "Fetch DROPPED %s: %s after %d retries - ticker removed from scan",
-                    ticker,
-                    type(exc).__name__,
-                    FETCH_MAX_RETRIES,
-                )
-                return None
+        # Semaphore released — sleep outside before next attempt
+        if need_retry:
+            await asyncio.sleep(backoff_delay)
+    return None
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -324,10 +337,20 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                     log.debug("Skipped %s: insufficient data", ticker)
                     return
 
+                # Deduplicate columns (belt-and-suspenders after _fetch)
+                if df.columns.duplicated().any():
+                    df = df.loc[:, ~df.columns.duplicated()]
+
                 # Check for empty Close column or all-NaN values
                 close_col = "Adj Close" if "Adj Close" in df.columns else "Close"
-                if close_col not in df.columns or df[close_col].isna().all():
+                if close_col not in df.columns:
                     log.debug("Skipped %s: no valid price data", ticker)
+                    return
+                close_series = df[close_col]
+                if isinstance(close_series, pd.DataFrame):
+                    close_series = close_series.iloc[:, 0]
+                if close_series.isna().all():
+                    log.debug("Skipped %s: all-NaN price data", ticker)
                     return
 
                 # ── Parallelize RS + S/R zone calculations (independent operations) ──
@@ -493,11 +516,8 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
 
             except Exception as exc:
                 log.error("Error processing %s: %s", ticker, exc)
-                # Log full traceback for debugging Series issues
                 import traceback
-                for line in traceback.format_exc().split('\n')[:15]:  # Limit to first 15 lines
-                    if line.strip():
-                        log.debug("  %s", line)
+                log.error("Traceback for %s:\n%s", ticker, traceback.format_exc())
             finally:
                 _scan_state["progress"] = idx + 1
 
@@ -610,13 +630,13 @@ async def trigger_scan(background_tasks: BackgroundTasks):
         }
 
     scan_ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
-    background_tasks.add_task(_run_scan, scan_ts, SCAN_UNIVERSE)
+    background_tasks.add_task(_run_scan, scan_ts, ACTIVE_UNIVERSE)
 
     return {
         "status": "started",
         "scan_timestamp": scan_ts,
-        "tickers": len(SCAN_UNIVERSE),
-        "message": f"Scanning {len(SCAN_UNIVERSE)} tickers in background",
+        "tickers": len(ACTIVE_UNIVERSE),
+        "message": f"Scanning {len(ACTIVE_UNIVERSE)} tickers in background",
     }
 
 

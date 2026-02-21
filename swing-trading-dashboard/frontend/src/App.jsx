@@ -62,18 +62,18 @@ export default function App() {
   const loadAllData = useCallback(async () => {
     setLoadingSetups(true)
     try {
-      const [reg, vcp, pb, base, wl] = await Promise.all([
+      const [reg, vcp, pb, base, wl] = await Promise.allSettled([
         fetchRegime(),
         fetchSetups('vcp'),
         fetchSetups('pullback'),
         fetchSetups('base'),
         fetchWatchlist(),
       ])
-      setRegime(reg)
-      setVcpSetups(vcp.setups      ?? [])
-      setPullbackSetups(pb.setups  ?? [])
-      setBaseSetups(base.setups    ?? [])
-      setWatchlistItems(wl.items   ?? [])
+      if (reg.status === 'fulfilled')  setRegime(reg.value)
+      if (vcp.status === 'fulfilled')  setVcpSetups(vcp.value.setups ?? [])
+      if (pb.status === 'fulfilled')   setPullbackSetups(pb.value.setups ?? [])
+      if (base.status === 'fulfilled') setBaseSetups(base.value.setups ?? [])
+      if (wl.status === 'fulfilled')   setWatchlistItems(wl.value.items ?? [])
     } catch (err) {
       console.error('[App] loadAllData:', err)
     } finally {

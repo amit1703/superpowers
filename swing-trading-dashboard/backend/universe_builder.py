@@ -172,11 +172,105 @@ def filter_price_volume(
     min_price: float = DEFAULT_MIN_PRICE,
     min_avg_volume: int = DEFAULT_MIN_AVG_VOLUME,
 ) -> List[str]:
-    """Filter tickers by minimum price and average volume.
+    """Filter tickers by minimum price and average daily volume.
 
-    Stub — returns an empty list.  Full implementation in a later task.
+    Downloads 3 months of daily data from yfinance in batches of
+    ``BATCH_SIZE``, then checks each ticker's last close price and
+    50-day average volume against the supplied thresholds.
+
+    Returns the subset of *tickers* that pass both filters.
     """
-    return []
+    passed: List[str] = []
+    total_batches = (len(tickers) + BATCH_SIZE - 1) // BATCH_SIZE
+
+    for batch_idx in range(total_batches):
+        start = batch_idx * BATCH_SIZE
+        batch = tickers[start : start + BATCH_SIZE]
+        logger.info(
+            "filter_price_volume: batch %d/%d (%d tickers)",
+            batch_idx + 1,
+            total_batches,
+            len(batch),
+        )
+
+        try:
+            df = yf.download(
+                " ".join(batch),
+                period="3mo",
+                interval="1d",
+                auto_adjust=False,
+                prepost=False,
+                progress=False,
+                threads=True,
+                group_by="ticker",
+            )
+        except Exception:
+            logger.exception("yf.download failed for batch %d", batch_idx + 1)
+            continue
+
+        if df is None or df.empty:
+            logger.warning("Empty result for batch %d — skipping", batch_idx + 1)
+            if batch_idx < total_batches - 1:
+                time.sleep(BATCH_DELAY)
+            continue
+
+        for ticker in batch:
+            try:
+                # --- extract per-ticker sub-DataFrame ---
+                if len(batch) == 1:
+                    # Single ticker: yfinance may return flat columns or
+                    # a MultiIndex with one ticker at level 0.
+                    if isinstance(df.columns, pd.MultiIndex):
+                        ticker_df = df[ticker].copy()
+                    else:
+                        ticker_df = df.copy()
+                else:
+                    # Multiple tickers: group_by="ticker" gives MultiIndex
+                    if ticker not in df.columns.get_level_values(0):
+                        continue
+                    ticker_df = df[ticker].copy()
+
+                # Drop rows that are entirely NaN (non-trading days / missing)
+                ticker_df = ticker_df.dropna(how="all")
+
+                if ticker_df.empty or len(ticker_df) < 10:
+                    continue
+
+                # --- last close price ---
+                if "Adj Close" in ticker_df.columns:
+                    last_close = float(ticker_df["Adj Close"].dropna().iloc[-1])
+                elif "Close" in ticker_df.columns:
+                    last_close = float(ticker_df["Close"].dropna().iloc[-1])
+                else:
+                    continue
+
+                if last_close < min_price:
+                    continue
+
+                # --- 50-day average volume ---
+                if "Volume" not in ticker_df.columns:
+                    continue
+                vol_series = ticker_df["Volume"].dropna()
+                avg_volume = float(vol_series.tail(50).mean())
+
+                if avg_volume < min_avg_volume:
+                    continue
+
+                passed.append(ticker)
+
+            except Exception:
+                logger.exception(
+                    "Error processing ticker %s — skipping", ticker
+                )
+
+        # Sleep between batches, but not after the last one
+        if batch_idx < total_batches - 1:
+            time.sleep(BATCH_DELAY)
+
+    logger.info(
+        "filter_price_volume: %d / %d tickers passed", len(passed), len(tickers)
+    )
+    return passed
 
 
 def build_sector_map(tickers: List[str]) -> Dict[str, str]:

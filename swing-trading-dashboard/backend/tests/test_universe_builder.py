@@ -1,13 +1,15 @@
-"""Tests for universe_builder.py — SEC fetch, pattern filter, save/load."""
+"""Tests for universe_builder.py — SEC fetch, pattern filter, save/load, price/volume filter."""
 
 import json
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from universe_builder import (
     fetch_sec_tickers,
+    filter_price_volume,
     filter_ticker_patterns,
     load_universe,
     save_universe,
@@ -162,3 +164,113 @@ class TestSaveLoadUniverse:
             fh.write("{this is not valid json!!!")
         result = load_universe(filepath)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Helper to build a single-ticker DataFrame (flat columns, as yfinance
+# returns for a single-ticker download)
+# ---------------------------------------------------------------------------
+
+
+def _make_single_ticker_df(
+    close: float = 150.0,
+    volume: int = 2_000_000,
+    rows: int = 60,
+) -> pd.DataFrame:
+    """Return a flat-column DataFrame mimicking ``yf.download`` for one ticker."""
+    idx = pd.date_range("2025-01-01", periods=rows, freq="B")
+    return pd.DataFrame(
+        {
+            "Open": close * 0.99,
+            "High": close * 1.01,
+            "Low": close * 0.98,
+            "Close": close,
+            "Adj Close": close,
+            "Volume": volume,
+        },
+        index=idx,
+    )
+
+
+# ---------------------------------------------------------------------------
+# TestFilterPriceVolume
+# ---------------------------------------------------------------------------
+
+
+class TestFilterPriceVolume:
+    """Tests for filter_price_volume (mocks yf.download)."""
+
+    @patch("universe_builder.time.sleep")  # don't actually sleep in tests
+    @patch("universe_builder.yf.download")
+    def test_filters_below_min_price(self, mock_download, _mock_sleep):
+        """Ticker with close=$5 should be excluded by the price filter."""
+        mock_download.return_value = _make_single_ticker_df(close=5.0, volume=1_000_000)
+
+        result = filter_price_volume(["PENNY"], min_price=10.0)
+
+        assert "PENNY" not in result
+        assert result == []
+
+    @patch("universe_builder.time.sleep")
+    @patch("universe_builder.yf.download")
+    def test_filters_below_min_volume(self, mock_download, _mock_sleep):
+        """Ticker with vol=100K should be excluded by the volume filter."""
+        mock_download.return_value = _make_single_ticker_df(close=50.0, volume=100_000)
+
+        result = filter_price_volume(["ILLIQUID"], min_price=10.0, min_avg_volume=500_000)
+
+        assert "ILLIQUID" not in result
+        assert result == []
+
+    @patch("universe_builder.time.sleep")
+    @patch("universe_builder.yf.download")
+    def test_passes_valid_ticker(self, mock_download, _mock_sleep):
+        """Ticker with close=$150 and vol=2M should pass both filters."""
+        mock_download.return_value = _make_single_ticker_df(close=150.0, volume=2_000_000)
+
+        result = filter_price_volume(["GOOD"], min_price=10.0, min_avg_volume=500_000)
+
+        assert result == ["GOOD"]
+
+    @patch("universe_builder.time.sleep")
+    @patch("universe_builder.yf.download")
+    def test_handles_failed_download(self, mock_download, _mock_sleep):
+        """Empty DataFrame from yf.download should not crash."""
+        mock_download.return_value = pd.DataFrame()
+
+        result = filter_price_volume(["BAD"])
+
+        assert result == []
+
+    @patch("universe_builder.time.sleep")
+    @patch("universe_builder.yf.download")
+    def test_handles_single_ticker_batch(self, mock_download, _mock_sleep):
+        """Single ticker produces flat (non-MultiIndex) columns — must work."""
+        df = _make_single_ticker_df(close=200.0, volume=3_000_000)
+        # Confirm it is indeed flat columns (no MultiIndex)
+        assert not isinstance(df.columns, pd.MultiIndex)
+        mock_download.return_value = df
+
+        result = filter_price_volume(["SOLO"])
+
+        assert result == ["SOLO"]
+
+    @patch("universe_builder.time.sleep")
+    @patch("universe_builder.yf.download")
+    def test_skips_ticker_with_too_few_rows(self, mock_download, _mock_sleep):
+        """Ticker with fewer than 10 rows of data should be skipped."""
+        mock_download.return_value = _make_single_ticker_df(close=100.0, volume=1_000_000, rows=5)
+
+        result = filter_price_volume(["SHORT"])
+
+        assert result == []
+
+    @patch("universe_builder.time.sleep")
+    @patch("universe_builder.yf.download")
+    def test_exception_in_download_skips_batch(self, mock_download, _mock_sleep):
+        """If yf.download raises an exception, the batch is skipped gracefully."""
+        mock_download.side_effect = Exception("Network timeout")
+
+        result = filter_price_volume(["CRASH"])
+
+        assert result == []

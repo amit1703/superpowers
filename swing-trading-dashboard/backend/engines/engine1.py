@@ -60,7 +60,8 @@ def calculate_sr_zones(
         if atr_series.dropna().empty:
             return []
 
-        daily_atr = float(atr_series.dropna().iloc[-1])
+        atr_val = atr_series.dropna().iloc[-1]
+        daily_atr = float(atr_val.item() if hasattr(atr_val, 'item') else atr_val)
         if daily_atr <= 0:
             return []
 
@@ -141,7 +142,8 @@ def calculate_sr_zones(
             return []
 
         # Get current price for proximity filtering
-        current_price = float(data[adj_col].iloc[-1])
+        cp_val = data[adj_col].iloc[-1]
+        current_price = float(cp_val.item() if hasattr(cp_val, 'item') else cp_val)
 
         peak_prices = x[peak_idx]
         peak_densities = density[peak_idx]

@@ -313,7 +313,8 @@ def scan_near_breakout(
             return None
 
         adj = _adj_col(data)
-        lc = float(data[adj].iloc[-1])
+        lc_val = data[adj].iloc[-1]
+        lc = float(lc_val.item() if hasattr(lc_val, 'item') else lc_val)
 
         PROXIMITY_PCT = 0.015   # 1.5% below level
 

@@ -273,17 +273,161 @@ def filter_price_volume(
     return passed
 
 
-def build_sector_map(tickers: List[str]) -> Dict[str, str]:
+def build_sector_map(
+    tickers: List[str],
+    existing_sectors: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
     """Build a mapping of ticker -> GICS sector.
 
-    Stub — returns an empty dict.  Full implementation in a later task.
+    If *existing_sectors* is ``None``, tries to load ``sectors.json`` from the
+    current directory as a base map.  Tickers already present in the map are
+    reused; only genuinely new tickers are fetched from yfinance.
+
+    ETFs (``quoteType == "ETF"``) get sector ``"ETF"``; tickers whose sector
+    cannot be determined get ``"Unknown"``.
     """
-    return {}
+    # Start from existing sectors or try loading sectors.json
+    if existing_sectors is None:
+        sectors_file = os.path.join(os.path.dirname(__file__), "sectors.json")
+        try:
+            with open(sectors_file, "r", encoding="utf-8") as fh:
+                sector_map: Dict[str, str] = json.load(fh)
+            logger.info("Loaded %d existing sectors from %s", len(sector_map), sectors_file)
+        except (FileNotFoundError, json.JSONDecodeError):
+            sector_map = {}
+    else:
+        sector_map = dict(existing_sectors)
+
+    # Determine which tickers need fetching
+    new_tickers = [t for t in tickers if t not in sector_map]
+
+    if not new_tickers:
+        logger.info("All %d tickers already have sectors — nothing to fetch", len(tickers))
+        return sector_map
+
+    logger.info(
+        "Need to fetch sectors for %d new tickers (reusing %d existing)",
+        len(new_tickers),
+        len(tickers) - len(new_tickers),
+    )
+
+    total_batches = (len(new_tickers) + SECTOR_BATCH_SIZE - 1) // SECTOR_BATCH_SIZE
+    for batch_idx in range(total_batches):
+        start = batch_idx * SECTOR_BATCH_SIZE
+        batch = new_tickers[start : start + SECTOR_BATCH_SIZE]
+        logger.info(
+            "build_sector_map: batch %d/%d (%d tickers)",
+            batch_idx + 1,
+            total_batches,
+            len(batch),
+        )
+
+        for ticker in batch:
+            try:
+                info = yf.Ticker(ticker).info
+                quote_type = info.get("quoteType", "")
+                if quote_type == "ETF":
+                    sector_map[ticker] = "ETF"
+                else:
+                    sector = info.get("sector", "")
+                    sector_map[ticker] = sector if sector else "Unknown"
+            except Exception:
+                logger.exception("Failed to fetch sector for %s", ticker)
+                sector_map[ticker] = "Unknown"
+
+        # Sleep between batches, but not after the last one
+        if batch_idx < total_batches - 1:
+            time.sleep(SECTOR_BATCH_DELAY)
+
+    return sector_map
 
 
-def build_universe() -> Optional[dict]:
+def build_universe(
+    min_price: float = DEFAULT_MIN_PRICE,
+    min_avg_volume: int = DEFAULT_MIN_AVG_VOLUME,
+) -> dict:
     """Orchestrate the full universe-building pipeline.
 
-    Stub — returns ``None``.  Full implementation in a later task.
+    1. Fetch SEC tickers (NYSE / Nasdaq only).
+    2. Apply pattern filters (warrants, preferred, ETFs, etc.).
+    3. Apply price & volume filters.
+    4. Build sector map and remove any remaining ETFs.
+    5. Return the final universe dict with metadata, tickers, and sectors.
     """
-    return None
+    start_time = time.time()
+
+    # Step 1 — fetch SEC tickers
+    sec_df = fetch_sec_tickers()
+    if sec_df.empty:
+        logger.warning("SEC ticker fetch returned empty — aborting build")
+        return {
+            "metadata": {},
+            "tickers": [],
+            "sectors": {},
+        }
+
+    # Step 2 — pattern filter
+    candidates = filter_ticker_patterns(sec_df["ticker"].tolist())
+
+    # Step 3 — price / volume filter
+    filtered = filter_price_volume(candidates, min_price, min_avg_volume)
+
+    # Step 4 — sector map
+    sectors = build_sector_map(filtered)
+
+    # Step 5 — remove ETFs
+    filtered_before_etf_removal = list(filtered)
+    etf_tickers = {t for t in filtered if sectors.get(t) == "ETF"}
+    etf_count = len(etf_tickers)
+    final_tickers = [t for t in filtered if t not in etf_tickers]
+    sectors_without_etfs = {t: s for t, s in sectors.items() if t in final_tickers}
+
+    build_time = round(time.time() - start_time, 1)
+    logger.info(
+        "Universe build complete: %d final tickers in %.1fs",
+        len(final_tickers),
+        build_time,
+    )
+
+    return {
+        "metadata": {
+            "generated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
+            "version": 1,
+            "source": "SEC EDGAR + yfinance",
+            "build_time_seconds": build_time,
+            "filters": {
+                "min_price": min_price,
+                "min_avg_volume_50d": min_avg_volume,
+                "exchanges": ["NYSE", "Nasdaq"],
+            },
+            "counts": {
+                "sec_raw": len(sec_df),
+                "after_pattern_filter": len(candidates),
+                "after_price_volume_filter": len(filtered_before_etf_removal),
+                "etfs_removed": etf_count,
+                "final": len(final_tickers),
+            },
+        },
+        "tickers": sorted(final_tickers),
+        "sectors": sectors_without_etfs,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    parser = argparse.ArgumentParser(description="Build active ticker universe")
+    parser.add_argument("--min-price", type=float, default=DEFAULT_MIN_PRICE)
+    parser.add_argument("--min-volume", type=int, default=DEFAULT_MIN_AVG_VOLUME)
+    parser.add_argument("--output", type=str, default=UNIVERSE_FILE)
+    args = parser.parse_args()
+
+    universe = build_universe(min_price=args.min_price, min_avg_volume=args.min_volume)
+    save_universe(universe, args.output)
+
+    print(f"\nDone. {len(universe['tickers'])} tickers saved to {args.output}")
+    print(f"Build time: {universe['metadata'].get('build_time_seconds', '?')}s")

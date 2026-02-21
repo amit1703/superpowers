@@ -1,13 +1,15 @@
-"""Tests for universe_builder.py — SEC fetch, pattern filter, save/load, price/volume filter."""
+"""Tests for universe_builder.py — SEC fetch, pattern filter, save/load, price/volume filter, sector map, build universe."""
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from universe_builder import (
+    build_sector_map,
+    build_universe,
     fetch_sec_tickers,
     filter_price_volume,
     filter_ticker_patterns,
@@ -274,3 +276,105 @@ class TestFilterPriceVolume:
         result = filter_price_volume(["CRASH"])
 
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# TestBuildSectorMap
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSectorMap:
+    """Tests for build_sector_map."""
+
+    def test_reuses_existing_sectors(self):
+        """Known tickers should use existing sector, not re-fetch."""
+        existing = {"AAPL": "Technology", "MSFT": "Technology"}
+        with patch("universe_builder.yf.Ticker") as mock_yf:
+            result = build_sector_map(["AAPL", "MSFT"], existing_sectors=existing)
+            # yf.Ticker should NOT be called since both are in existing
+            mock_yf.assert_not_called()
+            assert result["AAPL"] == "Technology"
+
+    def test_fetches_new_tickers(self):
+        """New tickers not in existing map should be fetched."""
+        existing = {"AAPL": "Technology"}
+        mock_ticker = MagicMock()
+        mock_ticker.info = {"sector": "Consumer Cyclical", "quoteType": "EQUITY"}
+        with patch("universe_builder.yf.Ticker", return_value=mock_ticker):
+            with patch("universe_builder.time.sleep"):
+                result = build_sector_map(["AAPL", "TSLA"], existing_sectors=existing)
+                assert result["AAPL"] == "Technology"  # from existing
+                assert result["TSLA"] == "Consumer Cyclical"  # fetched
+
+    def test_detects_etf_via_quote_type(self):
+        """ETFs should get sector 'ETF'."""
+        mock_ticker = MagicMock()
+        mock_ticker.info = {"quoteType": "ETF", "sector": ""}
+        with patch("universe_builder.yf.Ticker", return_value=mock_ticker):
+            with patch("universe_builder.time.sleep"):
+                result = build_sector_map(["SPY"], existing_sectors={})
+                assert result["SPY"] == "ETF"
+
+    def test_unknown_on_failure(self):
+        """Failed info fetch should give 'Unknown'."""
+        mock_ticker = MagicMock()
+        mock_ticker.info.__getitem__ = MagicMock(side_effect=Exception("fail"))
+        mock_ticker.info.get = MagicMock(return_value="")
+        with patch("universe_builder.yf.Ticker", return_value=mock_ticker):
+            with patch("universe_builder.time.sleep"):
+                result = build_sector_map(["MYSTERY"], existing_sectors={})
+                assert result["MYSTERY"] == "Unknown"
+
+
+# ---------------------------------------------------------------------------
+# TestBuildUniverse
+# ---------------------------------------------------------------------------
+
+
+class TestBuildUniverse:
+    """Tests for build_universe orchestrator."""
+
+    def test_full_pipeline_returns_valid_structure(self):
+        """Mocked end-to-end: should produce valid universe dict."""
+        mock_sec_df = pd.DataFrame({
+            "cik": [1, 2, 3],
+            "name": ["Apple", "Microsoft", "SPDR ETF"],
+            "ticker": ["AAPL", "MSFT", "SPY"],
+            "exchange": ["Nasdaq", "Nasdaq", "NYSE"],
+        })
+        with patch("universe_builder.fetch_sec_tickers", return_value=mock_sec_df), \
+             patch("universe_builder.filter_ticker_patterns", return_value=["AAPL", "MSFT"]), \
+             patch("universe_builder.filter_price_volume", return_value=["AAPL", "MSFT"]), \
+             patch("universe_builder.build_sector_map", return_value={"AAPL": "Technology", "MSFT": "Technology"}):
+
+            universe = build_universe()
+            assert "metadata" in universe
+            assert "tickers" in universe
+            assert "sectors" in universe
+            assert len(universe["tickers"]) == 2
+            assert universe["metadata"]["version"] == 1
+            assert "counts" in universe["metadata"]
+
+    def test_removes_etfs_from_final(self):
+        """ETFs detected via sector map should be removed from final tickers."""
+        mock_sec_df = pd.DataFrame({
+            "cik": [1, 2],
+            "name": ["Apple", "SPDR"],
+            "ticker": ["AAPL", "SPY"],
+            "exchange": ["Nasdaq", "NYSE"],
+        })
+        with patch("universe_builder.fetch_sec_tickers", return_value=mock_sec_df), \
+             patch("universe_builder.filter_ticker_patterns", return_value=["AAPL", "SPY"]), \
+             patch("universe_builder.filter_price_volume", return_value=["AAPL", "SPY"]), \
+             patch("universe_builder.build_sector_map", return_value={"AAPL": "Technology", "SPY": "ETF"}):
+
+            universe = build_universe()
+            assert "SPY" not in universe["tickers"]
+            assert "AAPL" in universe["tickers"]
+            assert "SPY" not in universe["sectors"]
+
+    def test_empty_sec_returns_error(self):
+        """If SEC fetch returns empty, should return error structure."""
+        with patch("universe_builder.fetch_sec_tickers", return_value=pd.DataFrame(columns=["cik", "name", "ticker", "exchange"])):
+            universe = build_universe()
+            assert universe["tickers"] == []

@@ -138,8 +138,24 @@ def _find_cup(close: np.ndarray, lookback: int = 120) -> Optional[Dict]:
 
 
 def _is_u_shaped(close: np.ndarray, cup: Dict) -> bool:
-    """Return True if the cup region fits a parabola with a > 0 (U-shape)."""
-    raise NotImplementedError
+    """Return True if cup region fits parabola with a > 0 (U-shape)."""
+    try:
+        start = cup["left_peak_idx"]
+        end = cup["right_rim_idx"] + 1
+        segment = close[start:end].astype(float)
+        if len(segment) < 6:
+            return False
+
+        x = np.arange(len(segment), dtype=float)
+        y = segment
+
+        def parabola(x, a, b, c):
+            return a * x ** 2 + b * x + c
+
+        popt, _ = curve_fit(parabola, x, y, maxfev=3000)
+        return float(popt[0]) > 0
+    except Exception:
+        return False
 
 
 def _find_handle(
@@ -149,7 +165,48 @@ def _find_handle(
     vol_sma50: float,
 ) -> Optional[Dict]:
     """Find a valid 5–25 day handle after the cup rim."""
-    raise NotImplementedError
+    rim_idx = cup["right_rim_idx"]
+    right_rim = cup["right_rim"]
+    cup_midpoint = (cup["left_peak"] + cup["cup_bottom"]) / 2.0
+
+    after_rim = close[rim_idx:]
+    if len(after_rim) < 6:
+        return None
+
+    # Search up to 25 days after the rim
+    handle_window = after_rim[:26]
+    handle_vols = volume[rim_idx: rim_idx + 26] if rim_idx + 26 <= len(volume) else volume[rim_idx:]
+
+    # Find the lowest point in handle (skip the rim bar itself)
+    search = handle_window[1:]
+    if len(search) < 4:
+        return None
+
+    handle_low_rel = int(np.argmin(search))
+    handle_low = float(search[handle_low_rel])
+    handle_length = len(search)
+
+    # Pullback: 5–15% from rim
+    pullback = (right_rim - handle_low) / right_rim
+    if pullback < 0.05 or pullback > 0.15:
+        return None
+
+    # Handle low must not undercut cup midpoint
+    if handle_low < cup_midpoint:
+        return None
+
+    # Volume must contract in handle vs 50-day avg
+    if vol_sma50 > 0 and len(handle_vols) >= 4:
+        handle_avg_vol = float(np.mean(handle_vols[1:4]))
+        if handle_avg_vol >= vol_sma50:
+            return None
+
+    return {
+        "handle_high": right_rim,
+        "handle_low": handle_low,
+        "pullback_pct": pullback,
+        "handle_length": handle_length,
+    }
 
 
 def _quality_score(

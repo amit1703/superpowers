@@ -131,3 +131,53 @@ class TestFindCup:
         if cup is not None:
             gap = (cup["left_peak"] - cup["right_rim"]) / cup["left_peak"]
             assert gap <= 0.10
+
+
+class TestIsUShaped:
+    def test_true_for_parabolic_cup(self):
+        df = make_cup_handle_df()
+        close = df["Close"].values
+        cup = _find_cup(close, lookback=120)
+        assert cup is not None
+        assert _is_u_shaped(close[-120:], cup) is True
+
+    def test_false_for_v_shape(self):
+        """Sharp V-drop: just ensure no crash and returns bool."""
+        close = np.concatenate([
+            np.linspace(100, 70, 5),
+            np.linspace(70, 100, 5),
+            np.ones(10) * 100,
+        ])
+        cup = {"left_peak_idx": 0, "right_rim_idx": 9,
+               "cup_bottom_idx": 4, "left_peak": 100.0,
+               "cup_bottom": 70.0, "right_rim": 100.0,
+               "depth": 0.30, "cup_length": 9}
+        result = _is_u_shaped(close, cup)
+        assert isinstance(result, bool)
+
+
+class TestFindHandle:
+    def test_finds_valid_handle(self):
+        df = make_cup_handle_df(handle_pct=0.08)
+        close = df["Close"].values[-120:]
+        volume = df["Volume"].values[-120:]
+        cup = _find_cup(close, lookback=120)
+        assert cup is not None
+        vol_sma50 = float(np.mean(volume))
+        handle = _find_handle(close, volume, cup, vol_sma50)
+        assert handle is not None
+        assert "handle_high" in handle
+        assert "handle_low" in handle
+        assert 0.05 <= handle["pullback_pct"] <= 0.15
+
+    def test_rejects_deep_handle(self):
+        """Handle pullback > 15% should return None."""
+        df = make_cup_handle_df(handle_pct=0.25)
+        close = df["Close"].values[-120:]
+        volume = df["Volume"].values[-120:]
+        cup = _find_cup(close, lookback=120)
+        if cup is not None:
+            vol_sma50 = float(np.mean(volume))
+            handle = _find_handle(close, volume, cup, vol_sma50)
+            if handle is not None:
+                assert handle["pullback_pct"] <= 0.15

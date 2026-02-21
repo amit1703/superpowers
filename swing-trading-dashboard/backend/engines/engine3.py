@@ -100,15 +100,15 @@ def scan_pullback(
         if len(cci_clean) < 2:
             return None
 
-        lc = float(close.iloc[-1])
-        lh = float(high.iloc[-1])
-        ll = float(low.iloc[-1])
-        l8 = float(ema8.iloc[-1])
-        l20 = float(ema20.iloc[-1])
-        l50 = float(sma50.iloc[-1])
-        latr = float(atr14.iloc[-1])
-        cci_today = float(cci20.iloc[-1])
-        cci_prev = float(cci20.iloc[-2])
+        lc = float(close.iloc[-1].item() if hasattr(close.iloc[-1], 'item') else close.iloc[-1])
+        lh = float(high.iloc[-1].item() if hasattr(high.iloc[-1], 'item') else high.iloc[-1])
+        ll = float(low.iloc[-1].item() if hasattr(low.iloc[-1], 'item') else low.iloc[-1])
+        l8 = float(ema8.iloc[-1].item() if hasattr(ema8.iloc[-1], 'item') else ema8.iloc[-1])
+        l20 = float(ema20.iloc[-1].item() if hasattr(ema20.iloc[-1], 'item') else ema20.iloc[-1])
+        l50 = float(sma50.iloc[-1].item() if hasattr(sma50.iloc[-1], 'item') else sma50.iloc[-1])
+        latr = float(atr14.iloc[-1].item() if hasattr(atr14.iloc[-1], 'item') else atr14.iloc[-1])
+        cci_today = float(cci20.iloc[-1].item() if hasattr(cci20.iloc[-1], 'item') else cci20.iloc[-1])
+        cci_prev = float(cci20.iloc[-2].item() if hasattr(cci20.iloc[-2], 'item') else cci20.iloc[-2])
 
         if any(np.isnan(v) for v in [lc, lh, ll, l8, l20, l50, latr, cci_today, cci_prev]):
             return None
@@ -240,15 +240,15 @@ def scan_relaxed_pullback(
         if len(cci_clean) < 2:
             return None
 
-        lc = float(close.iloc[-1])
-        lh = float(high.iloc[-1])
-        ll = float(low.iloc[-1])
-        l8 = float(ema8.iloc[-1])
-        l20 = float(ema20.iloc[-1])
-        l50 = float(sma50.iloc[-1])
-        latr = float(atr14.iloc[-1])
-        cci_today = float(cci20.iloc[-1])
-        cci_prev = float(cci20.iloc[-2])
+        lc = float(close.iloc[-1].item() if hasattr(close.iloc[-1], 'item') else close.iloc[-1])
+        lh = float(high.iloc[-1].item() if hasattr(high.iloc[-1], 'item') else high.iloc[-1])
+        ll = float(low.iloc[-1].item() if hasattr(low.iloc[-1], 'item') else low.iloc[-1])
+        l8 = float(ema8.iloc[-1].item() if hasattr(ema8.iloc[-1], 'item') else ema8.iloc[-1])
+        l20 = float(ema20.iloc[-1].item() if hasattr(ema20.iloc[-1], 'item') else ema20.iloc[-1])
+        l50 = float(sma50.iloc[-1].item() if hasattr(sma50.iloc[-1], 'item') else sma50.iloc[-1])
+        latr = float(atr14.iloc[-1].item() if hasattr(atr14.iloc[-1], 'item') else atr14.iloc[-1])
+        cci_today = float(cci20.iloc[-1].item() if hasattr(cci20.iloc[-1], 'item') else cci20.iloc[-1])
+        cci_prev = float(cci20.iloc[-2].item() if hasattr(cci20.iloc[-2], 'item') else cci20.iloc[-2])
 
         if any(np.isnan(v) for v in [lc, lh, ll, l8, l20, l50, latr, cci_today, cci_prev]):
             return None

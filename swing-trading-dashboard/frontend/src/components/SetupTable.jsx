@@ -66,6 +66,7 @@ export default function SetupTable({ title, accentColor, setups, selectedTicker,
                 const isKdeBreakout     = s.is_kde_breakout === true
                 const isRelaxed         = s.is_relaxed === true
                 const isRsLead          = s.is_rs_lead === true
+                const isAscendingTdl    = s.is_ascending_tdl === true
 
                 // Row background: green tint for volume-surge rows
                 const rowStyle = isVolSurge
@@ -171,11 +172,31 @@ export default function SetupTable({ title, accentColor, setups, selectedTicker,
                           )}
                         </div>
                       ) : (
-                        /* Pullback: show CCI value + RLX badge */
+                        /* Pullback: show CCI value + ASC-TDL badge + RLX badge */
                         <div className="flex items-center gap-1">
                           <span className="text-t-muted text-[9px]">
                             CCI {s.cci_today?.toFixed(0) ?? '—'}
                           </span>
+
+                          {/* ASC-TDL badge — Ascending trendline pullback (NEW) */}
+                          {isAscendingTdl && (
+                            <span
+                              className="badge"
+                              style={{
+                                background: '#FF6B35',
+                                color: 'white',
+                                border: 'none',
+                                fontSize: '7px',
+                                fontWeight: '700',
+                                letterSpacing: '0.5px',
+                                padding: '2px 4px',
+                              }}
+                              title="Ascending Trendline Pullback (3rd touch bounce)"
+                            >
+                              ASC-TDL
+                            </span>
+                          )}
+
                           {isRelaxed && (
                             <span
                               className="badge"

@@ -358,6 +358,7 @@ def scan_vcp(
                     "is_rs_lead":         False,
                     "rs_ratio_today":     rs_ratio,
                     "rs_52w_high":        rs_52w_high,
+                    "rs_blue_dot":        rs_blue_dot,
                     "trendline":          None,
                 }
 
@@ -401,6 +402,7 @@ def scan_vcp(
                     "is_rs_lead":         False,
                     "rs_ratio_today":     rs_ratio,
                     "rs_52w_high":        rs_52w_high,
+                    "rs_blue_dot":        rs_blue_dot,
                     "trendline":          trendline_data,
                 }
 
@@ -454,6 +456,7 @@ def scan_vcp(
                         "is_rs_lead":         False,
                         "rs_ratio_today":     rs_ratio,
                         "rs_52w_high":        rs_52w_high,
+                        "rs_blue_dot":        rs_blue_dot,
                         "trendline":          None,
                     }
 
@@ -501,6 +504,7 @@ def scan_vcp(
                         "is_rs_lead":         True,
                         "rs_ratio_today":     rs_ratio,
                         "rs_52w_high":        rs_52w_high,
+                        "rs_blue_dot":        rs_blue_dot,
                         "trendline":          None,
                     }
 
@@ -597,6 +601,7 @@ def scan_vcp(
             "is_rs_lead":         False,
             "rs_ratio_today":     rs_ratio,
             "rs_52w_high":        rs_52w_high,
+            "rs_blue_dot":        rs_blue_dot,
             "trendline":          None,
         }
 

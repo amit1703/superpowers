@@ -445,7 +445,7 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                     # Only check relaxed if no strict pullback found
                     try:
                         pb_relaxed = await loop.run_in_executor(
-                            None, scan_relaxed_pullback, ticker, df, zones
+                            None, scan_relaxed_pullback, ticker, df, zones, tl
                         )
                         if pb_relaxed:
                             # Sanitize relaxed pullback output

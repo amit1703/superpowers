@@ -202,6 +202,7 @@ def scan_relaxed_pullback(
     ticker: str,
     df: pd.DataFrame,
     sr_zones: List[Dict],
+    trendline: Optional[Dict] = None,
 ) -> Optional[Dict]:
     """
     Relaxed tactical pullback: triggers when no strict pullback found.
@@ -211,6 +212,8 @@ def scan_relaxed_pullback(
     2. Buffer Zone: Close within 0.8% of EMA-8 OR EMA-20 (either, not both)
     3. CCI Early Signal: CCI[today] > CCI[yesterday] AND CCI[yesterday] < 0
     4. Low Volume: 3-day avg volume <= 100% of 50-day SMA
+
+    Also checks for ascending trendline support if no horizontal zone found.
     """
     try:
         data = _prep(df)
@@ -287,6 +290,15 @@ def scan_relaxed_pullback(
         # Use lowest (most defensive) support level for relaxed pullbacks
         support_level = min([z["level"] for z in support_zones]) if support_zones else l50
 
+        # Check ascending trendline if no horizontal support zone found
+        is_ascending_tdl = False
+        if not support_zones and trendline is not None:
+            ascending_tl = trendline.get("ascending")
+            if ascending_tl is not None:
+                touched, support_level = _check_ascending_trendline_touch(ll, ascending_tl)
+                if touched:
+                    is_ascending_tdl = True
+
         # Validate support level is actually below current price
         if support_level >= lc:
             return None
@@ -314,6 +326,7 @@ def scan_relaxed_pullback(
             "ema8": round(l8, 2),
             "ema20": round(l20, 2),
             "is_relaxed": True,
+            "is_ascending_tdl": is_ascending_tdl,
         }
 
     except Exception as exc:  # noqa: BLE001

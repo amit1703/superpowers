@@ -34,13 +34,47 @@ from indicators import ema as _ema, sma as _sma, atr as _atr, cci as _cci
 # Public API
 # ---------------------------------------------------------------------------
 
+def _check_ascending_trendline_touch(
+    low_price: float,
+    trendline_dict: Optional[Dict],
+) -> tuple:
+    """
+    Check if low touches ascending trendline (within 0.8%).
+
+    Args:
+        low_price: Current bar's low
+        trendline_dict: Ascending trendline dict from detect_trendline()
+
+    Returns:
+        (touched: bool, support_level: float)
+    """
+    if trendline_dict is None or "series" not in trendline_dict:
+        return False, 0.0
+
+    if not trendline_dict["series"]:
+        return False, 0.0
+
+    # Get today's value from the series
+    tl_value = trendline_dict["series"][-1]["value"]
+
+    # Check if low is within 0.8% of trendline
+    if tl_value > 0:
+        tolerance = tl_value * 0.008
+        if abs(low_price - tl_value) <= tolerance:
+            return True, tl_value
+
+    return False, 0.0
+
+
 def scan_pullback(
     ticker: str,
     df: pd.DataFrame,
     sr_zones: List[Dict],
+    trendline: Optional[Dict] = None,
 ) -> Optional[Dict]:
     """
     Returns a setup dict if a valid tactical pullback is found, else None.
+    Checks both horizontal support zones AND ascending trendlines.
     """
     try:
         data = _prep(df)
@@ -88,7 +122,7 @@ def scan_pullback(
         if not (ll <= l8 or ll <= l20):
             return None
 
-        # ── 3. Engine 1 support zone touch ───────────────────────────────
+        # ── 3a. Engine 1 support zone touch (HORIZONTAL) ───────────────────
         support_zones = [z for z in sr_zones if z["type"] == "SUPPORT"]
         nearest_sup = None
 
@@ -99,6 +133,24 @@ def scan_pullback(
             if low_in_zone or close_in_zone:
                 nearest_sup = z
                 break
+
+        # ── 3b. Ascending trendline touch (NEW) ─────────────────────────────
+        is_ascending_tdl = False
+        ascending_tl_value = 0.0
+
+        if nearest_sup is None and trendline is not None:
+            ascending_tl = trendline.get("ascending")
+            if ascending_tl is not None:
+                touched, support_level = _check_ascending_trendline_touch(ll, ascending_tl)
+                if touched:
+                    is_ascending_tdl = True
+                    ascending_tl_value = support_level
+                    # Create a "virtual zone" for consistent logic
+                    nearest_sup = {
+                        "level": ascending_tl_value,
+                        "lower": ascending_tl_value * 0.99,
+                        "upper": ascending_tl_value * 1.01,
+                    }
 
         if nearest_sup is None:
             return None
@@ -138,6 +190,7 @@ def scan_pullback(
             "support_level": nearest_sup["level"],
             "ema8": round(l8, 2),
             "ema20": round(l20, 2),
+            "is_ascending_tdl": is_ascending_tdl,  # NEW FLAG
         }
 
     except Exception as exc:  # noqa: BLE001

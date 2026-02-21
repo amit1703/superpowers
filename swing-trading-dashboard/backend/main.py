@@ -398,10 +398,12 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                     log.info("  %s      %-6s  entry=%.2f", setup_type, ticker, vcp["entry"])
 
                 else:
+                    # Detect trendline once (used by both near-breakout and pullback)
+                    tl = await loop.run_in_executor(None, detect_trendline, ticker, df)
+
                     # Only check near-breakout if not already a full setup
                     # Wrap entire near-breakout logic in try-except for robustness
                     try:
-                        tl = await loop.run_in_executor(None, detect_trendline, ticker, df)
                         near = await loop.run_in_executor(
                             None, scan_near_breakout, ticker, df, zones, tl
                         )
@@ -423,7 +425,7 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                         # Continue to pullback checks even if near-breakout fails
 
                 # Engine 3: Tactical pullback (strict, then relaxed)
-                pb = await loop.run_in_executor(None, scan_pullback, ticker, df, zones)
+                pb = await loop.run_in_executor(None, scan_pullback, ticker, df, zones, tl)
                 if pb:
                     # Sanitize pullback output
                     try:

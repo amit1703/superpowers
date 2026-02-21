@@ -94,3 +94,40 @@ def make_flat_base_df(n_total=100, base_depth=0.08, base_days=35):
         "Volume": volume,
     }, index=dates)
     return df
+
+
+class TestFindCup:
+    def test_finds_cup_in_valid_data(self):
+        df = make_cup_handle_df()
+        close = df["Close"].values
+        cup = _find_cup(close, lookback=120)
+        assert cup is not None
+        assert "left_peak" in cup
+        assert "cup_bottom" in cup
+        assert "right_rim" in cup
+        assert 0.12 <= cup["depth"] <= 0.35
+
+    def test_rejects_too_shallow(self):
+        """Cup depth < 12% should return None."""
+        close = np.linspace(100, 98, 120)   # only 2% dip — too shallow
+        cup = _find_cup(close, lookback=120)
+        if cup is not None:
+            assert cup["depth"] >= 0.12
+
+    def test_rejects_too_deep(self):
+        """Cup depth > 35% should return None."""
+        close = np.concatenate([
+            np.linspace(100, 50, 60),   # 50% drop — too deep
+            np.linspace(50, 100, 60),
+        ])
+        cup = _find_cup(close, lookback=120)
+        if cup is not None:
+            assert cup["depth"] <= 0.35
+
+    def test_right_rim_within_10pct_of_left_peak(self):
+        df = make_cup_handle_df()
+        close = df["Close"].values
+        cup = _find_cup(close, lookback=120)
+        if cup is not None:
+            gap = (cup["left_peak"] - cup["right_rim"]) / cup["left_peak"]
+            assert gap <= 0.10

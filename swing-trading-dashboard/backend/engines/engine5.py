@@ -79,7 +79,62 @@ def scan_flat_base(
 
 def _find_cup(close: np.ndarray, lookback: int = 120) -> Optional[Dict]:
     """Locate cup: left peak → cup bottom → right rim."""
-    raise NotImplementedError
+    n = len(close)
+    data = close[-lookback:] if n >= lookback else close
+    if len(data) < 30:
+        return None
+
+    # Left peak: highest close in first 2/3 of window
+    two_thirds = len(data) * 2 // 3
+    left_search = data[:two_thirds]
+    if len(left_search) < 10:
+        return None
+
+    left_peak_idx = int(np.argmax(left_search))
+    left_peak = float(left_search[left_peak_idx])
+
+    # Cup bottom: lowest close after left peak
+    after_peak = data[left_peak_idx:]
+    if len(after_peak) < 5:
+        return None
+
+    cup_bottom_rel = int(np.argmin(after_peak))
+    cup_bottom_idx = left_peak_idx + cup_bottom_rel
+    cup_bottom = float(data[cup_bottom_idx])
+
+    # Cup depth validation: 12–35%
+    depth = (left_peak - cup_bottom) / left_peak
+    if depth < 0.12 or depth > 0.35:
+        return None
+
+    # Right rim: highest close after cup bottom
+    after_bottom = data[cup_bottom_idx:]
+    if len(after_bottom) < 5:
+        return None
+
+    right_rim_rel = int(np.argmax(after_bottom))
+    right_rim_idx = cup_bottom_idx + right_rim_rel
+    right_rim = float(data[right_rim_idx])
+
+    # Right rim must recover to within 10% of left peak
+    if (left_peak - right_rim) / left_peak > 0.10:
+        return None
+
+    # Cup must span at least 20 bars
+    cup_length = right_rim_idx - left_peak_idx
+    if cup_length < 20:
+        return None
+
+    return {
+        "left_peak_idx": left_peak_idx,
+        "left_peak": left_peak,
+        "cup_bottom_idx": cup_bottom_idx,
+        "cup_bottom": cup_bottom,
+        "right_rim_idx": right_rim_idx,
+        "right_rim": right_rim,
+        "depth": depth,
+        "cup_length": cup_length,
+    }
 
 
 def _is_u_shaped(close: np.ndarray, cup: Dict) -> bool:

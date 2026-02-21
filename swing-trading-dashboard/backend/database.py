@@ -81,11 +81,13 @@ CREATE TABLE IF NOT EXISTS trades (
 """
 
 _INDEXES = [
-    "CREATE INDEX IF NOT EXISTS idx_setups_ts     ON scan_setups(scan_timestamp);",
-    "CREATE INDEX IF NOT EXISTS idx_setups_type   ON scan_setups(scan_timestamp, setup_type);",
-    "CREATE INDEX IF NOT EXISTS idx_zones_ticker  ON sr_zones(ticker, scan_timestamp);",
-    "CREATE INDEX IF NOT EXISTS idx_regime_ts     ON market_regime(scan_timestamp);",
-    "CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);",
+    "CREATE INDEX IF NOT EXISTS idx_setups_ts         ON scan_setups(scan_timestamp);",
+    "CREATE INDEX IF NOT EXISTS idx_setups_type       ON scan_setups(scan_timestamp, setup_type);",
+    "CREATE INDEX IF NOT EXISTS idx_setups_ticker     ON scan_setups(ticker);",
+    "CREATE INDEX IF NOT EXISTS idx_zones_ticker      ON sr_zones(ticker, scan_timestamp);",
+    "CREATE INDEX IF NOT EXISTS idx_zones_scan        ON sr_zones(scan_timestamp);",
+    "CREATE INDEX IF NOT EXISTS idx_regime_ts         ON market_regime(scan_timestamp);",
+    "CREATE INDEX IF NOT EXISTS idx_trades_status     ON trades(status);",
 ]
 
 

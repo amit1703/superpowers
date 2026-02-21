@@ -219,12 +219,13 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
         )
 
         if not regime["is_bullish"]:
-            log.info("Market is BEARISH — Engines 2 & 3 disabled")
+            log.info("Market is BEARISH — RS calculations + Engines 2 & 3 disabled (0s saved)")
             await complete_scan_run(DB_PATH, scan_ts, 0)
             _scan_state["last_completed"] = scan_ts
             return
 
         # ── SPY data (consolidated single fetch for 3m return + RS Line) ──
+        # Only fetched when market is bullish; conditional RS calculation optimizes cycles
         spy_3m_return = 0.0
         spy_df_full = None
         spy_fetch_start = time.time()
@@ -270,38 +271,49 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                     log.debug("Skipped %s: no valid price data", ticker)
                     return
 
-                # ── RS Line Calculation ────────────────────────────────────
+                # ── Parallelize RS + S/R zone calculations (independent operations) ──
                 rs_line = None
                 rs_ratio = 0.0
                 rs_52w_high = 0.0
                 rs_blue_dot = False
+                zones: List[Dict] = []
 
+                # Run RS and S/R zone calculations in parallel
+                rs_task = None
                 if spy_df_full is not None:
+                    rs_task = loop.run_in_executor(None, calculate_rs_line, df, spy_df_full)
+
+                sr_task = loop.run_in_executor(None, calculate_sr_zones, ticker, df)
+
+                # Await both in parallel
+                if rs_task:
                     try:
-                        rs_line = await loop.run_in_executor(
-                            None, calculate_rs_line, df, spy_df_full
+                        rs_line, zones = await asyncio.gather(rs_task, sr_task)
+                    except Exception as exc:
+                        log.warning("Parallel RS/SR calculation failed for %s: %s", ticker, exc)
+                        rs_line = None
+                        zones = await sr_task  # Fall back to SR-only
+                else:
+                    zones = await sr_task
+
+                # Process RS results if available
+                if rs_line and len(rs_line) >= 252:
+                    try:
+                        # Use .item() to safely convert numpy scalars to Python floats
+                        rs_today = rs_line[-1]
+                        rs_ratio = float(rs_today.item() if hasattr(rs_today, 'item') else rs_today)
+
+                        rs_max = max(rs_line)
+                        rs_52w_high = float(rs_max.item() if hasattr(rs_max, 'item') else rs_max)
+
+                        rs_blue_dot = await loop.run_in_executor(
+                            None, detect_rs_blue_dot, rs_line
                         )
-                        if rs_line and len(rs_line) >= 252:
-                            # Use .item() to safely convert numpy scalars to Python floats
-                            rs_today = rs_line[-1]
-                            rs_ratio = float(rs_today.item() if hasattr(rs_today, 'item') else rs_today)
-
-                            rs_max = max(rs_line)
-                            rs_52w_high = float(rs_max.item() if hasattr(rs_max, 'item') else rs_max)
-
-                            rs_blue_dot = await loop.run_in_executor(
-                                None, detect_rs_blue_dot, rs_line
-                            )
                     except Exception as rs_exc:
-                        log.warning("RS calculation failed for %s: %s", ticker, rs_exc)
+                        log.warning("RS processing failed for %s: %s", ticker, rs_exc)
                         rs_ratio = 0.0
                         rs_52w_high = 0.0
                         rs_blue_dot = False
-
-                # Engine 1: S/R zones
-                zones: List[Dict] = await loop.run_in_executor(
-                    None, calculate_sr_zones, ticker, df
-                )
                 if zones:
                     await save_sr_zones(DB_PATH, scan_ts, ticker, zones)
 

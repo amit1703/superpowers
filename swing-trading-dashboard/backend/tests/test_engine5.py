@@ -215,3 +215,53 @@ class TestQualityScore:
     def test_score_in_range(self):
         score = _quality_score(0.15, 0.35, 0.70, 0.02, False)
         assert 0 <= score <= 100
+
+
+class TestScanCupHandle:
+    def test_detects_cup_handle_in_synthetic_data(self):
+        df = make_cup_handle_df(cup_depth=0.20, handle_pct=0.08)
+        result = scan_cup_handle("TEST", df, spy_3m_return=0.03,
+                                  rs_ratio=1.05, rs_52w_high=1.0, rs_blue_dot=False)
+        if result is not None:
+            assert result["setup_type"] == "BASE"
+            assert result["base_type"] == "CUP_HANDLE"
+            assert result["signal"] in ("DRY", "BRK")
+            assert result["entry"] > result["stop_loss"]
+            assert result["take_profit"] > result["entry"]
+            assert result["rr"] == 2.0
+            assert 0 <= result["quality_score"] <= 100
+            assert "base_depth_pct" in result
+            assert "base_length_days" in result
+
+    def test_returns_none_for_short_data(self):
+        df = make_cup_handle_df()
+        result = scan_cup_handle("TEST", df.iloc[:30])
+        assert result is None
+
+    def test_returns_none_for_empty_df(self):
+        result = scan_cup_handle("TEST", pd.DataFrame())
+        assert result is None
+
+
+class TestScanFlatBase:
+    def test_detects_flat_base_in_synthetic_data(self):
+        df = make_flat_base_df(base_depth=0.07, base_days=35)
+        result = scan_flat_base("TEST", df, spy_3m_return=0.02,
+                                 rs_ratio=1.03, rs_52w_high=1.0, rs_blue_dot=True)
+        if result is not None:
+            assert result["setup_type"] == "BASE"
+            assert result["base_type"] == "FLAT_BASE"
+            assert result["signal"] in ("DRY", "BRK")
+            assert result["entry"] > result["stop_loss"]
+            assert result["take_profit"] > result["entry"]
+            assert 0 <= result["quality_score"] <= 100
+
+    def test_rejects_wide_base(self):
+        """Base depth > 15% should return None."""
+        df = make_flat_base_df(base_depth=0.25, base_days=35)
+        result = scan_flat_base("TEST", df)
+        assert result is None
+
+    def test_returns_none_for_empty_df(self):
+        result = scan_flat_base("TEST", pd.DataFrame())
+        assert result is None

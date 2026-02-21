@@ -48,9 +48,13 @@ def scan_base_pattern(
     rs_52w_high: float = 0.0,
     rs_blue_dot: bool = False,
 ) -> Optional[Dict]:
-    """Main entry point. Tries Cup & Handle first, then Flat Base.
-    Returns the highest-quality setup found, or None."""
-    raise NotImplementedError
+    """Main entry point. Returns the highest-quality base setup found, or None."""
+    ch = scan_cup_handle(ticker, df, spy_3m_return, rs_ratio, rs_52w_high, rs_blue_dot)
+    fb = scan_flat_base(ticker, df, spy_3m_return, rs_ratio, rs_52w_high, rs_blue_dot)
+    candidates = [s for s in [ch, fb] if s is not None]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda s: s.get("quality_score", 0))
 
 
 def scan_cup_handle(
@@ -62,7 +66,115 @@ def scan_cup_handle(
     rs_blue_dot: bool = False,
 ) -> Optional[Dict]:
     """Scan for a Cup & Handle pattern. Returns setup dict or None."""
-    raise NotImplementedError
+    try:
+        data = _prep(df)
+        if data is None or len(data) < 60:
+            return None
+
+        adj = _adj_col(data)
+        close_s = data[adj]
+        high_s = data["High"]
+        low_s = data["Low"]
+        volume_s = data["Volume"]
+
+        if close_s.dropna().shape[0] < 55:
+            return None
+
+        close = close_s.values.astype(float)
+        volume = volume_s.values.astype(float)
+
+        atr14 = _atr(high_s, low_s, close_s, 14)
+        latr_val = atr14.iloc[-1]
+        latr = float(latr_val.item() if hasattr(latr_val, 'item') else latr_val)
+        if np.isnan(latr) or latr <= 0:
+            return None
+
+        vol_sma_series = volume_s.rolling(50).mean()
+        vol_sma_val = vol_sma_series.iloc[-1]
+        vol_sma50 = float(vol_sma_val.item() if hasattr(vol_sma_val, 'item') else vol_sma_val)
+        if np.isnan(vol_sma50) or vol_sma50 <= 0:
+            return None
+
+        # Use last 120 bars for cup detection
+        lookback = min(120, len(close))
+        close_lb = close[-lookback:]
+        volume_lb = volume[-lookback:]
+
+        cup = _find_cup(close_lb, lookback=lookback)
+        if cup is None:
+            return None
+
+        if not _is_u_shaped(close_lb, cup):
+            return None
+
+        handle = _find_handle(close_lb, volume_lb, cup, vol_sma50)
+        if handle is None:
+            return None
+
+        # Determine signal
+        lc_val = close_s.iloc[-1]
+        lc = float(lc_val.item() if hasattr(lc_val, 'item') else lc_val)
+        lh_val = high_s.iloc[-1]
+        lh = float(lh_val.item() if hasattr(lh_val, 'item') else lh_val)
+
+        handle_high = handle["handle_high"]
+        dist_to_pivot = (handle_high - lc) / handle_high if handle_high > 0 else 1.0
+        last_vol_val = volume_s.iloc[-1]
+        last_vol = float(last_vol_val.item() if hasattr(last_vol_val, 'item') else last_vol_val)
+        vol_ratio = last_vol / vol_sma50 if vol_sma50 > 0 else 0.0
+
+        if lc > handle_high and vol_ratio >= 1.2:
+            signal = "BRK"
+        elif dist_to_pivot <= 0.015:
+            signal = "DRY"
+        else:
+            return None
+
+        # Risk math
+        entry = round(handle_high * 1.001, 2)
+        stop_loss = round(handle["handle_low"] - 0.2 * latr, 2)
+        risk = entry - stop_loss
+        if risk <= 0 or risk > entry * 0.15:
+            return None
+        take_profit = round(entry + 2.0 * risk, 2)
+
+        # RS vs SPY
+        rs_vs_spy = (rs_ratio - spy_3m_return) if spy_3m_return != 0 else 0.0
+
+        # Volume dry-up: 5-day avg vs 50-day avg
+        vol_dry_pct = float(np.mean(volume[-5:])) / vol_sma50 if vol_sma50 > 0 else 1.0
+
+        qs = _quality_score(
+            depth_pct=cup["depth"],
+            max_depth_pct=0.35,
+            vol_dry_pct=vol_dry_pct,
+            rs_vs_spy=rs_vs_spy,
+            rs_blue_dot=rs_blue_dot,
+        )
+
+        offset = len(close) - lookback
+        base_length = (len(close) - 1) - (offset + cup["left_peak_idx"])
+
+        return {
+            "ticker": ticker,
+            "setup_type": "BASE",
+            "base_type": "CUP_HANDLE",
+            "signal": signal,
+            "entry": entry,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "rr": 2.0,
+            "quality_score": qs,
+            "base_depth_pct": round(cup["depth"] * 100, 1),
+            "base_length_days": max(0, base_length),
+            "volume_dry_pct": round(vol_dry_pct * 100, 1),
+            "rs_vs_spy": round(rs_vs_spy * 100, 2),
+            "setup_date": str(data.index[-1].date()),
+        }
+
+    except Exception as exc:
+        print(f"[Engine5/CupHandle] {ticker}: {exc}")
+        return None
 
 
 def scan_flat_base(
@@ -74,7 +186,118 @@ def scan_flat_base(
     rs_blue_dot: bool = False,
 ) -> Optional[Dict]:
     """Scan for a Flat Base pattern. Returns setup dict or None."""
-    raise NotImplementedError
+    try:
+        data = _prep(df)
+        if data is None or len(data) < 60:
+            return None
+
+        adj = _adj_col(data)
+        close_s = data[adj]
+        high_s = data["High"]
+        low_s = data["Low"]
+        volume_s = data["Volume"]
+
+        if close_s.dropna().shape[0] < 55:
+            return None
+
+        # Look at last 25–60 days
+        lookback = min(60, len(close_s))
+        if lookback < 25:
+            return None
+
+        base_close = close_s.iloc[-lookback:]
+        base_high = float(base_close.max())
+        base_low_price = float(low_s.iloc[-lookback:].min())
+
+        # Depth: (high - low) / high <= 15%
+        depth = (base_high - float(base_close.min())) / base_high
+        if depth > 0.15:
+            return None
+
+        # Current close in upper 75% of range
+        lc_val = close_s.iloc[-1]
+        lc = float(lc_val.item() if hasattr(lc_val, 'item') else lc_val)
+        range_span = base_high - float(base_close.min())
+        if range_span > 0:
+            pct_in_range = (lc - float(base_close.min())) / range_span
+            if pct_in_range < 0.25:
+                return None
+
+        # Volume contraction: 10-day avg <= 85% of 50-day avg
+        vol_sma50_s = volume_s.rolling(50).mean()
+        vol_sma10_s = volume_s.rolling(10).mean()
+        vsm50_val = vol_sma50_s.iloc[-1]
+        vsm10_val = vol_sma10_s.iloc[-1]
+        vsm50 = float(vsm50_val.item() if hasattr(vsm50_val, 'item') else vsm50_val)
+        vsm10 = float(vsm10_val.item() if hasattr(vsm10_val, 'item') else vsm10_val)
+
+        if np.isnan(vsm50) or vsm50 <= 0 or np.isnan(vsm10):
+            return None
+
+        vol_ratio_10_50 = vsm10 / vsm50
+        if vol_ratio_10_50 > 0.85:
+            return None
+
+        # ATR
+        atr14 = _atr(high_s, low_s, close_s, 14)
+        latr_val = atr14.iloc[-1]
+        latr = float(latr_val.item() if hasattr(latr_val, 'item') else latr_val)
+        if np.isnan(latr) or latr <= 0:
+            return None
+
+        # Signal
+        lh_val = high_s.iloc[-1]
+        lh = float(lh_val.item() if hasattr(lh_val, 'item') else lh_val)
+        last_vol_val = volume_s.iloc[-1]
+        last_vol = float(last_vol_val.item() if hasattr(last_vol_val, 'item') else last_vol_val)
+        vol_ratio = last_vol / vsm50 if vsm50 > 0 else 0.0
+        dist_to_pivot = (base_high - lc) / base_high if base_high > 0 else 1.0
+
+        if lc > base_high and vol_ratio >= 1.2:
+            signal = "BRK"
+        elif dist_to_pivot <= 0.015:
+            signal = "DRY"
+        else:
+            return None
+
+        # Risk math
+        entry = round(base_high * 1.001, 2)
+        stop_loss = round(base_low_price - 0.2 * latr, 2)
+        risk = entry - stop_loss
+        if risk <= 0 or risk > entry * 0.15:
+            return None
+        take_profit = round(entry + 2.0 * risk, 2)
+
+        rs_vs_spy = (rs_ratio - spy_3m_return) if spy_3m_return != 0 else 0.0
+
+        qs = _quality_score(
+            depth_pct=depth,
+            max_depth_pct=0.15,
+            vol_dry_pct=vol_ratio_10_50,
+            rs_vs_spy=rs_vs_spy,
+            rs_blue_dot=rs_blue_dot,
+        )
+
+        return {
+            "ticker": ticker,
+            "setup_type": "BASE",
+            "base_type": "FLAT_BASE",
+            "signal": signal,
+            "entry": entry,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "rr": 2.0,
+            "quality_score": qs,
+            "base_depth_pct": round(depth * 100, 1),
+            "base_length_days": lookback,
+            "volume_dry_pct": round(vol_ratio_10_50 * 100, 1),
+            "rs_vs_spy": round(rs_vs_spy * 100, 2),
+            "setup_date": str(data.index[-1].date()),
+        }
+
+    except Exception as exc:
+        print(f"[Engine5/FlatBase] {ticker}: {exc}")
+        return None
 
 
 def _find_cup(close: np.ndarray, lookback: int = 120) -> Optional[Dict]:

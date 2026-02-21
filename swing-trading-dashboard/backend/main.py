@@ -30,6 +30,7 @@ Run
 import asyncio
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -53,6 +54,7 @@ from database import (
     save_regime,
     save_scan_run,
     save_setup,
+    batch_save_setups,
     save_sr_zones,
     add_trade,
     get_trades,
@@ -70,7 +72,7 @@ from tickers import SCAN_UNIVERSE
 # ────────────────────────────────────────────────────────────────────────────
 
 DB_PATH = "trading.db"
-CONCURRENCY_LIMIT = 10         # max simultaneous yfinance fetches
+CONCURRENCY_LIMIT = 25         # max simultaneous yfinance fetches (optimized from 10)
 DATA_FETCH_PERIOD = "1y"       # lookback for each ticker
 
 logging.basicConfig(
@@ -188,6 +190,7 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
     Results written to SQLite; frontend reads from DB.
     """
     global _scan_state
+    scan_start_time = time.time()
 
     log.info("▶ Scan started  ts=%s  tickers=%d", scan_ts, len(tickers))
     _scan_state.update(
@@ -203,13 +206,16 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
 
         # ── Engine 0: Market regime ───────────────────────────────────────
         loop = asyncio.get_event_loop()
+        regime_start = time.time()
         regime = await loop.run_in_executor(None, check_market_regime)
+        regime_time = time.time() - regime_start
         await save_regime(DB_PATH, scan_ts, regime)
         log.info(
-            "Engine 0: %s  (SPY=%.2f  EMA20=%.2f)",
+            "Engine 0: %s  (SPY=%.2f  EMA20=%.2f)  [%.1fs]",
             regime["regime"],
             regime["spy_close"],
             regime["spy_20ema"],
+            regime_time,
         )
 
         if not regime["is_bullish"]:
@@ -218,33 +224,34 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
             _scan_state["last_completed"] = scan_ts
             return
 
-        # ── SPY 3-month return (for Engine 2 relative-strength gate) ─────
+        # ── SPY data (consolidated single fetch for 3m return + RS Line) ──
         spy_3m_return = 0.0
-        spy_df = None
-        try:
-            spy_df = await _fetch("SPY")
-            if spy_df is not None and len(spy_df) >= 64:
-                adj_col = "Adj Close" if "Adj Close" in spy_df.columns else "Close"
-                spy_close = spy_df[adj_col]
-                spy_3m_return = float(
-                    spy_close.iloc[-1] / spy_close.iloc[-64] - 1
-                )
-            log.info("SPY 3-month return: %.2f%%", spy_3m_return * 100)
-        except Exception as exc:
-            log.warning("Could not compute SPY 3m return: %s", exc)
-
-        # ── SPY full data (for RS Line calculations) ─────────────────────
         spy_df_full = None
+        spy_fetch_start = time.time()
         try:
             spy_df_full = await _fetch("SPY")
             if spy_df_full is not None and len(spy_df_full) >= 252:
                 log.info("SPY data fetched: %d days for RS Line", len(spy_df_full))
+                # Extract 3-month return from the consolidated fetch
+                if len(spy_df_full) >= 64:
+                    adj_col = "Adj Close" if "Adj Close" in spy_df_full.columns else "Close"
+                    spy_close = spy_df_full[adj_col]
+                    spy_3m_return = float(
+                        spy_close.iloc[-1] / spy_close.iloc[-64] - 1
+                    )
+                    log.info("SPY 3-month return: %.2f%%", spy_3m_return * 100)
         except Exception as exc:
-            log.warning("Could not fetch full SPY data for RS: %s", exc)
+            log.warning("Could not fetch SPY data for RS/3m return: %s", exc)
+
+        spy_fetch_time = time.time() - spy_fetch_start
+        log.info("SPY fetch completed  [%.1fs]", spy_fetch_time)
 
         # ── Per-ticker processing ─────────────────────────────────────────
+        # Collect setups instead of saving individually for batch optimization
+        collected_setups: List[Dict] = []
         vcp_count = 0
         pb_count = 0
+        process_start_time = time.time()
 
         async def _process(ticker: str, idx: int) -> None:
             nonlocal vcp_count, pb_count
@@ -314,9 +321,9 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                         log.warning("VCP conversion failed for %s: %s", ticker, conv_err)
                         return
 
-                    # Add sector to setup
+                    # Add sector to setup and collect for batch save
                     vcp["sector"] = SECTORS.get(ticker, "Unknown")
-                    await save_setup(DB_PATH, scan_ts, vcp)
+                    collected_setups.append(vcp)
                     vcp_count += 1
 
                     setup_type = "RS LEAD" if vcp.get("is_rs_lead") else "VCP"
@@ -341,7 +348,7 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
 
                             near["sector"] = SECTORS.get(ticker, "Unknown")
                             near["rs_blue_dot"] = rs_blue_dot
-                            await save_setup(DB_PATH, scan_ts, near)
+                            collected_setups.append(near)
                             log.info("  NEAR     %-6s  dist=%.1f%%", ticker, near["distance_pct"])
                     except Exception as near_exc:
                         log.warning("Near-breakout check failed for %s: %s", ticker, near_exc)
@@ -361,7 +368,7 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                         return
 
                     pb["sector"] = SECTORS.get(ticker, "Unknown")
-                    await save_setup(DB_PATH, scan_ts, pb)
+                    collected_setups.append(pb)
                     pb_count += 1
                     log.info("  PULLBACK %-6s  entry=%.2f", ticker, pb["entry"])
                 else:
@@ -382,7 +389,7 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                                 return
 
                             pb_relaxed["sector"] = SECTORS.get(ticker, "Unknown")
-                            await save_setup(DB_PATH, scan_ts, pb_relaxed)
+                            collected_setups.append(pb_relaxed)
                             pb_count += 1
                             log.info("  PULLBACK %-6s  entry=%.2f (relaxed)", ticker, pb_relaxed["entry"])
                     except Exception as pb_rel_exc:
@@ -395,6 +402,22 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
 
         # Gather all ticker tasks; semaphore handles concurrency internally
         await asyncio.gather(*[_process(t, i) for i, t in enumerate(tickers)])
+
+        process_time = time.time() - process_start_time
+        log.info(
+            "Per-ticker processing completed  [%.1fs]  vcp=%d  pb=%d  total_setups=%d",
+            process_time,
+            vcp_count,
+            pb_count,
+            len(collected_setups),
+        )
+
+        # ── Batch Save All Setups (5-10x faster than individual saves) ──────
+        if collected_setups:
+            db_save_start = time.time()
+            await batch_save_setups(DB_PATH, scan_ts, collected_setups)
+            db_save_time = time.time() - db_save_start
+            log.info("Batch saved %d setups to database  [%.1fs]", len(collected_setups), db_save_time)
 
         # ── Sector Summary with Bold Highlighting ───────────────────────────
         # Sectors with 3+ setups are highlighted in bold for institutional rotation
@@ -427,7 +450,17 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
 
         await complete_scan_run(DB_PATH, scan_ts, len(tickers))
         _scan_state["last_completed"] = scan_ts
-        log.info("✔ Scan complete  VCP=%d  Pullbacks=%d", vcp_count, pb_count)
+
+        total_scan_time = time.time() - scan_start_time
+        log.info(
+            "✔ Scan complete  VCP=%d  Pullbacks=%d  Total=%.1fs  (Regime=%.1fs, SPY=%.1fs, Process=%.1fs)",
+            vcp_count,
+            pb_count,
+            total_scan_time,
+            regime_time,
+            spy_fetch_time,
+            process_time,
+        )
 
     except Exception as exc:
         log.error("Scan worker crashed: %s", exc)

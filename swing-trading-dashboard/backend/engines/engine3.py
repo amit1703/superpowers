@@ -274,11 +274,14 @@ def scan_relaxed_pullback(
 
         # ── 4. Low Volume: 3-day avg <= 100% of 50-day SMA ────────────────
         vol_sma50 = volume.rolling(50).mean()
-        if pd.isna(vol_sma50.iloc[-1]) or float(vol_sma50.iloc[-1]) <= 0:
+        vsm_val = vol_sma50.iloc[-1]
+        vsm_scalar = float(vsm_val.item() if hasattr(vsm_val, 'item') else vsm_val)
+        if pd.isna(vsm_scalar) or vsm_scalar <= 0:
             return None
 
-        avg_vol = float(vol_sma50.iloc[-1])
-        last3_vol = float(volume.iloc[-3:].mean())
+        avg_vol = vsm_scalar
+        v3m_val = volume.iloc[-3:].mean()
+        last3_vol = float(v3m_val.item() if hasattr(v3m_val, 'item') else v3m_val)
 
         if last3_vol > avg_vol:
             return None

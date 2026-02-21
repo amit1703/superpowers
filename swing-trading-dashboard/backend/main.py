@@ -49,6 +49,8 @@ from constants import (
     DATA_FETCH_PERIOD,
     DB_PATH,
     DAYS_3_MONTHS,
+    FETCH_BACKOFF_BASE,
+    FETCH_MAX_RETRIES,
     MIN_CANDLES_FOR_ANALYSIS,
     MIN_CANDLES_FOR_RS,
     TRADING_DAYS_IN_YEAR,
@@ -153,8 +155,17 @@ app.add_middleware(
 # Data helpers
 # ────────────────────────────────────────────────────────────────────────────
 
-async def _fetch(ticker: str) -> Optional[pd.DataFrame]:
-    """Download daily OHLCV for one ticker, rate-limited by the semaphore."""
+async def _fetch(ticker: str, retry_count: int = 0) -> Optional[pd.DataFrame]:
+    """
+    Download daily OHLCV for one ticker with retry logic and exponential backoff.
+
+    Args:
+        ticker: Ticker symbol to fetch
+        retry_count: Current retry attempt (0 = initial, 1-3 = retries)
+
+    Returns:
+        DataFrame with OHLCV data, or None if all retries exhausted
+    """
     async with _semaphore:
         loop = asyncio.get_event_loop()
         try:
@@ -170,18 +181,55 @@ async def _fetch(ticker: str) -> Optional[pd.DataFrame]:
                     threads=False,
                 ),
             )
+
+            # Check if data is valid
+            if df is None or df.empty:
+                if retry_count < FETCH_MAX_RETRIES:
+                    backoff_delay = FETCH_BACKOFF_BASE * (2 ** retry_count)
+                    log.warning(
+                        "Fetch %s: empty/None data (attempt %d/%d), retrying in %.1fs...",
+                        ticker,
+                        retry_count + 1,
+                        FETCH_MAX_RETRIES,
+                        backoff_delay,
+                    )
+                    await asyncio.sleep(backoff_delay)
+                    return await _fetch(ticker, retry_count + 1)
+                else:
+                    log.warning(
+                        "Fetch DROPPED %s: empty/None data after %d retries - ticker data unavailable",
+                        ticker,
+                        FETCH_MAX_RETRIES,
+                    )
+                    return None
+
+            # Flatten MultiIndex (newer yfinance versions)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            return df
+
         except Exception as exc:
-            log.warning("Fetch failed %s: %s", ticker, exc)
-            return None
-
-    if df is None or df.empty:
-        return None
-
-    # Flatten MultiIndex (newer yfinance versions)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    return df
+            if retry_count < FETCH_MAX_RETRIES:
+                backoff_delay = FETCH_BACKOFF_BASE * (2 ** retry_count)
+                log.warning(
+                    "Fetch %s: failed with %s (attempt %d/%d), retrying in %.1fs...",
+                    ticker,
+                    type(exc).__name__,
+                    retry_count + 1,
+                    FETCH_MAX_RETRIES,
+                    backoff_delay,
+                )
+                await asyncio.sleep(backoff_delay)
+                return await _fetch(ticker, retry_count + 1)
+            else:
+                log.warning(
+                    "Fetch DROPPED %s: %s after %d retries - ticker removed from scan",
+                    ticker,
+                    type(exc).__name__,
+                    FETCH_MAX_RETRIES,
+                )
+                return None
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -255,18 +303,21 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
         # ── Per-ticker processing ─────────────────────────────────────────
         # Collect setups instead of saving individually for batch optimization
         collected_setups: List[Dict] = []
+        dropped_tickers: List[str] = []  # Track tickers that failed all retries
         vcp_count = 0
         pb_count = 0
         process_start_time = time.time()
 
         async def _process(ticker: str, idx: int) -> None:
-            nonlocal vcp_count, pb_count
+            nonlocal vcp_count, pb_count, dropped_tickers
 
             try:
                 # ── Data Integrity Check ────────────────────────────────────
                 # Skip tickers with empty/delisted data immediately
                 df = await _fetch(ticker)
                 if df is None or len(df) < MIN_CANDLES_FOR_ANALYSIS:
+                    if df is None:
+                        dropped_tickers.append(ticker)  # Record as dropped
                     log.debug("Skipped %s: insufficient data", ticker)
                     return
 
@@ -468,11 +519,27 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
         await complete_scan_run(DB_PATH, scan_ts, len(tickers))
         _scan_state["last_completed"] = scan_ts
 
+        # ── Data Quality Report ───────────────────────────────────────────
+        processed_tickers = len(tickers) - len(dropped_tickers)
+        if dropped_tickers:
+            log.warning(
+                "⚠ DATA QUALITY: %d/%d tickers dropped after retries",
+                len(dropped_tickers),
+                len(tickers),
+            )
+            log.warning("  Dropped tickers: %s", ", ".join(sorted(dropped_tickers[:20])))
+            if len(dropped_tickers) > 20:
+                log.warning("  ... and %d more", len(dropped_tickers) - 20)
+        else:
+            log.info("✓ DATA QUALITY: All %d tickers processed successfully (0 dropped)", len(tickers))
+
         total_scan_time = time.time() - scan_start_time
         log.info(
-            "✔ Scan complete  VCP=%d  Pullbacks=%d  Total=%.1fs  (Regime=%.1fs, SPY=%.1fs, Process=%.1fs)",
+            "✔ Scan complete  VCP=%d  Pullbacks=%d  Processed=%d/%d  Total=%.1fs  (Regime=%.1fs, SPY=%.1fs, Process=%.1fs)",
             vcp_count,
             pb_count,
+            processed_tickers,
+            len(tickers),
             total_scan_time,
             regime_time,
             spy_fetch_time,

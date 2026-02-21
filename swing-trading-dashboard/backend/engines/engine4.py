@@ -15,6 +15,8 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+from constants import TRADING_DAYS_IN_YEAR, RS_BLUE_DOT_TOLERANCE_PCT
+
 
 def calculate_rs_line(
     ticker_df: pd.DataFrame,
@@ -57,7 +59,7 @@ def calculate_rs_line(
 
         # Align dates: use intersection of both series
         common_dates = ticker_close.index.intersection(spy_close.index)
-        if len(common_dates) < 252:
+        if len(common_dates) < TRADING_DAYS_IN_YEAR:
             return None  # Need at least 252 trading days
 
         ticker_aligned = ticker_close[common_dates]
@@ -67,7 +69,7 @@ def calculate_rs_line(
         rs_line = (ticker_aligned / spy_aligned).values.tolist()
 
         # Return only last 252 days
-        return rs_line[-252:] if len(rs_line) >= 252 else None
+        return rs_line[-TRADING_DAYS_IN_YEAR:] if len(rs_line) >= TRADING_DAYS_IN_YEAR else None
 
     except Exception as exc:
         print(f"[calculate_rs_line] Error: {exc}")
@@ -92,14 +94,14 @@ def detect_rs_blue_dot(rs_line: List[float]) -> bool:
         True if current ratio is at 52-week high, False otherwise
     """
     try:
-        if rs_line is None or len(rs_line) < 252:
+        if rs_line is None or len(rs_line) < TRADING_DAYS_IN_YEAR:
             return False
 
         rs_today = float(rs_line[-1])
         rs_52w_high = float(np.max(rs_line))
 
         # Blue Dot if within 0.5% of 52-week high (tolerance for rounding)
-        return rs_today >= rs_52w_high * 0.995
+        return rs_today >= rs_52w_high * (1 - RS_BLUE_DOT_TOLERANCE_PCT)
 
     except Exception as exc:
         print(f"[detect_rs_blue_dot] Error: {exc}")

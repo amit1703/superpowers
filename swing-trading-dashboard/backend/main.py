@@ -44,6 +44,15 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from constants import (
+    CONCURRENCY_LIMIT,
+    DATA_FETCH_PERIOD,
+    DB_PATH,
+    DAYS_3_MONTHS,
+    MIN_CANDLES_FOR_ANALYSIS,
+    MIN_CANDLES_FOR_RS,
+    TRADING_DAYS_IN_YEAR,
+)
 from database import (
     complete_scan_run,
     get_latest_regime,
@@ -68,12 +77,8 @@ from engines.engine4 import calculate_rs_line, detect_rs_blue_dot, get_rs_stats
 from tickers import SCAN_UNIVERSE
 
 # ────────────────────────────────────────────────────────────────────────────
-# Config
+# Configuration (imported from constants.py for centralized management)
 # ────────────────────────────────────────────────────────────────────────────
-
-DB_PATH = "trading.db"
-CONCURRENCY_LIMIT = 25         # max simultaneous yfinance fetches (optimized from 10)
-DATA_FETCH_PERIOD = "1y"       # lookback for each ticker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -231,14 +236,14 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
         spy_fetch_start = time.time()
         try:
             spy_df_full = await _fetch("SPY")
-            if spy_df_full is not None and len(spy_df_full) >= 252:
+            if spy_df_full is not None and len(spy_df_full) >= MIN_CANDLES_FOR_RS:
                 log.info("SPY data fetched: %d days for RS Line", len(spy_df_full))
                 # Extract 3-month return from the consolidated fetch
-                if len(spy_df_full) >= 64:
+                if len(spy_df_full) >= DAYS_3_MONTHS:
                     adj_col = "Adj Close" if "Adj Close" in spy_df_full.columns else "Close"
                     spy_close = spy_df_full[adj_col]
                     spy_3m_return = float(
-                        spy_close.iloc[-1] / spy_close.iloc[-64] - 1
+                        spy_close.iloc[-1] / spy_close.iloc[-DAYS_3_MONTHS] - 1
                     )
                     log.info("SPY 3-month return: %.2f%%", spy_3m_return * 100)
         except Exception as exc:
@@ -261,7 +266,7 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                 # ── Data Integrity Check ────────────────────────────────────
                 # Skip tickers with empty/delisted data immediately
                 df = await _fetch(ticker)
-                if df is None or len(df) < 60:
+                if df is None or len(df) < MIN_CANDLES_FOR_ANALYSIS:
                     log.debug("Skipped %s: insufficient data", ticker)
                     return
 
@@ -297,7 +302,7 @@ async def _run_scan(scan_ts: str, tickers: List[str]) -> None:
                     zones = await sr_task
 
                 # Process RS results if available
-                if rs_line and len(rs_line) >= 252:
+                if rs_line and len(rs_line) >= MIN_CANDLES_FOR_RS:
                     try:
                         # Use .item() to safely convert numpy scalars to Python floats
                         rs_today = rs_line[-1]

@@ -48,6 +48,7 @@ export default function App() {
   const [regime,         setRegime        ] = useState(null)
   const [vcpSetups,      setVcpSetups     ] = useState([])
   const [pullbackSetups, setPullbackSetups] = useState([])
+  const [baseSetups,     setBaseSetups    ] = useState([])
   const [watchlistItems, setWatchlistItems] = useState([])
   const [selectedTicker, setSelectedTicker] = useState(null)
   const [chartData,      setChartData     ] = useState(null)
@@ -61,16 +62,18 @@ export default function App() {
   const loadAllData = useCallback(async () => {
     setLoadingSetups(true)
     try {
-      const [reg, vcp, pb, wl] = await Promise.all([
+      const [reg, vcp, pb, base, wl] = await Promise.all([
         fetchRegime(),
         fetchSetups('vcp'),
         fetchSetups('pullback'),
+        fetchSetups('base'),
         fetchWatchlist(),
       ])
       setRegime(reg)
-      setVcpSetups(vcp.setups     ?? [])
-      setPullbackSetups(pb.setups ?? [])
-      setWatchlistItems(wl.items  ?? [])
+      setVcpSetups(vcp.setups      ?? [])
+      setPullbackSetups(pb.setups  ?? [])
+      setBaseSetups(base.setups    ?? [])
+      setWatchlistItems(wl.items   ?? [])
     } catch (err) {
       console.error('[App] loadAllData:', err)
     } finally {
@@ -245,10 +248,20 @@ export default function App() {
                 loading={loadingSetups}
               />
 
+              <SetupTable
+                title="Base Patterns"
+                accentColor="green"
+                setups={baseSetups}
+                selectedTicker={selectedTicker}
+                onSelectTicker={handleTickerClick}
+                loading={loadingSetups}
+              />
+
               <div className="mt-auto px-3 py-3 border-t border-t-border">
                 <ScanFooter
                   vcpCount={vcpSetups.length}
                   pbCount={pullbackSetups.length}
+                  baseCount={baseSetups.length}
                   scanTimestamp={scanStatus.last_completed}
                 />
               </div>
@@ -277,7 +290,7 @@ export default function App() {
 
 // ── Scan footer ───────────────────────────────────────────────────────────
 
-function ScanFooter({ vcpCount, pbCount, scanTimestamp }) {
+function ScanFooter({ vcpCount, pbCount, baseCount = 0, scanTimestamp }) {
   const fmtTs = (ts) => {
     if (!ts) return 'Never'
     try {
@@ -298,6 +311,7 @@ function ScanFooter({ vcpCount, pbCount, scanTimestamp }) {
       <div className="flex gap-3 text-[9px] text-t-muted">
         <span><span className="text-t-blue font-600">{vcpCount}</span> VCP</span>
         <span><span className="text-t-accent font-600">{pbCount}</span> Pullback</span>
+        <span><span className="text-t-green font-600">{baseCount}</span> Base</span>
         <span className="ml-auto text-t-border">v1.0</span>
       </div>
     </div>

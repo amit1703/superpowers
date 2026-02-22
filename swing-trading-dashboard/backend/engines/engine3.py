@@ -57,9 +57,9 @@ def _check_ascending_trendline_touch(
     # Get today's value from the series
     tl_value = trendline_dict["series"][-1]["value"]
 
-    # Check if low is within 0.8% of trendline
+    # Check if low is within 1.5% of trendline
     if tl_value > 0:
-        tolerance = tl_value * 0.008
+        tolerance = tl_value * 0.015
         if abs(low_price - tl_value) <= tolerance:
             return True, tl_value
 
@@ -134,23 +134,25 @@ def scan_pullback(
                 nearest_sup = z
                 break
 
-        # ── 3b. Ascending trendline touch (NEW) ─────────────────────────────
+        # ── 3b. Ascending trendline touch ───────────────────────────────────
+        # Always check independently — flag even if a horizontal zone also matched
         is_ascending_tdl = False
         ascending_tl_value = 0.0
 
-        if nearest_sup is None and trendline is not None:
+        if trendline is not None:
             ascending_tl = trendline.get("ascending")
             if ascending_tl is not None:
                 touched, support_level = _check_ascending_trendline_touch(ll, ascending_tl)
                 if touched:
                     is_ascending_tdl = True
                     ascending_tl_value = support_level
-                    # Create a "virtual zone" for consistent logic
-                    nearest_sup = {
-                        "level": ascending_tl_value,
-                        "lower": ascending_tl_value * 0.99,
-                        "upper": ascending_tl_value * 1.01,
-                    }
+                    # Use trendline as support if no horizontal zone was found
+                    if nearest_sup is None:
+                        nearest_sup = {
+                            "level": ascending_tl_value,
+                            "lower": ascending_tl_value * 0.99,
+                            "upper": ascending_tl_value * 1.01,
+                        }
 
         if nearest_sup is None:
             return None
@@ -161,7 +163,8 @@ def scan_pullback(
             return None
 
         # ── 5. CCI momentum hook ─────────────────────────────────────────
-        if not (cci_prev < -100.0 and cci_today > cci_prev):
+        # CCI must have dipped below -50 (oversold) and be turning up (hook)
+        if not (cci_prev < -50.0 and cci_today > cci_prev):
             return None
 
         # ── Risk math ────────────────────────────────────────────────────
@@ -257,12 +260,12 @@ def scan_relaxed_pullback(
         if not (l8 > l20 and lc > l50):
             return None
 
-        # ── 2. Buffer Zone: within 0.8% of EMA-8 OR EMA-20 ───────────────
+        # ── 2. Buffer Zone: within 2% of EMA-8 OR EMA-20 ────────────────
         dist_to_8 = abs(lc - l8) / l8 if l8 > 0 else float("inf")
         dist_to_20 = abs(lc - l20) / l20 if l20 > 0 else float("inf")
 
-        near_8 = dist_to_8 <= 0.008
-        near_20 = dist_to_20 <= 0.008
+        near_8 = dist_to_8 <= 0.02
+        near_20 = dist_to_20 <= 0.02
 
         if not (near_8 or near_20):
             return None
@@ -293,14 +296,17 @@ def scan_relaxed_pullback(
         # Use lowest (most defensive) support level for relaxed pullbacks
         support_level = min([z["level"] for z in support_zones]) if support_zones else l50
 
-        # Check ascending trendline if no horizontal support zone found
+        # Always check ascending trendline independently — flag even if horizontal zones exist
         is_ascending_tdl = False
-        if not support_zones and trendline is not None:
+        if trendline is not None:
             ascending_tl = trendline.get("ascending")
             if ascending_tl is not None:
-                touched, support_level = _check_ascending_trendline_touch(ll, ascending_tl)
+                touched, tl_level = _check_ascending_trendline_touch(ll, ascending_tl)
                 if touched:
                     is_ascending_tdl = True
+                    # Use trendline level as support if no horizontal zones found
+                    if not support_zones:
+                        support_level = tl_level
 
         # Validate support level is actually below current price
         if support_level >= lc:

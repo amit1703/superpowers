@@ -29,13 +29,18 @@ const COLORS = {
   accent:       '#F5A623',
   go:           '#00c87a',
   halt:         '#ff2d55',
-  ema8:         '#00C8FF',
-  ema20:        '#F5A623',
-  sma50:        '#FF6EC7',
+  ema8:         '#9B6EFF',
+  ema20:        '#FFD700',
+  sma50:        '#F5A623',
   cci:          '#9B6EFF',
   cciOb:        'rgba(255, 45, 85, 0.12)',
   cciOs:        'rgba(0, 200, 122, 0.10)',
+  sma200:       '#FF5C8A',
   trendline:    '#FFFFFF',
+  trendlineAsc: '#00E5FF',
+  baseFlatBox:  'rgba(0, 200, 122, 0.12)',
+  baseFlatEdge: 'rgba(0, 200, 122, 0.5)',
+  cupArc:       'rgba(155, 110, 255, 0.5)',
 }
 
 const SHARED_CHART_OPTS = {
@@ -139,7 +144,7 @@ export default function TradingChart({ ticker, chartData, loading }) {
       })
     }
 
-    // ── EMA 8 (electric blue, thin solid) ─────────────────────────────────
+    // ── EMA 8 (purple, thin solid) ──────────────────────────────────────
     const ema8Series = mainChart.addLineSeries({
       color:            COLORS.ema8,
       lineWidth:        1,
@@ -149,7 +154,7 @@ export default function TradingChart({ ticker, chartData, loading }) {
     })
     if (chartData.ema8?.length) ema8Series.setData(chartData.ema8)
 
-    // ── EMA 20 (amber, thin solid) ─────────────────────────────────────────
+    // ── EMA 20 (yellow, thin solid) ─────────────────────────────────────────
     const ema20Series = mainChart.addLineSeries({
       color:            COLORS.ema20,
       lineWidth:        1,
@@ -159,21 +164,33 @@ export default function TradingChart({ ticker, chartData, loading }) {
     })
     if (chartData.ema20?.length) ema20Series.setData(chartData.ema20)
 
-    // ── SMA 50 (pink, dashed) ──────────────────────────────────────────────
+    // ── SMA 50 (orange, solid) ─────────────────────────────────────────────
     const sma50Series = mainChart.addLineSeries({
       color:            COLORS.sma50,
       lineWidth:        1.5,
-      lineStyle:        LineStyle.Dashed,
       priceLineVisible: false,
       lastValueVisible: false,
       crosshairMarkerVisible: false,
     })
     if (chartData.sma50?.length) sma50Series.setData(chartData.sma50)
 
-    // ── Trendline (bright white diagonal line) ────────────────────────────
-    let trendlineSeries = null
-    if (chartData.trendline?.series?.length) {
-      trendlineSeries = mainChart.addLineSeries({
+    // ── SMA 200 (red-pink, thick solid) ────────────────────────────────────
+    const sma200Series = mainChart.addLineSeries({
+      color:            COLORS.sma200,
+      lineWidth:        2,
+      lineStyle:        LineStyle.Solid,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    })
+    if (chartData.sma200?.length) sma200Series.setData(chartData.sma200)
+
+    // ── Trendlines (descending = resistance, ascending = support) ──────
+    let descTrendlineSeries = null
+    let ascTrendlineSeries  = null
+
+    if (chartData.trendline?.descending?.series?.length) {
+      descTrendlineSeries = mainChart.addLineSeries({
         color:            COLORS.trendline,
         lineWidth:        1.5,
         lineStyle:        LineStyle.Solid,
@@ -181,7 +198,141 @@ export default function TradingChart({ ticker, chartData, loading }) {
         lastValueVisible: false,
         crosshairMarkerVisible: false,
       })
-      trendlineSeries.setData(chartData.trendline.series)
+      descTrendlineSeries.setData(chartData.trendline.descending.series)
+    }
+
+    if (chartData.trendline?.ascending?.series?.length) {
+      ascTrendlineSeries = mainChart.addLineSeries({
+        color:            COLORS.trendlineAsc,
+        lineWidth:        1.5,
+        lineStyle:        LineStyle.Solid,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      })
+      ascTrendlineSeries.setData(chartData.trendline.ascending.series)
+    }
+
+    // ── Base Pattern Overlays ───────────────────────────────────────────
+    if (chartData.base_setup?.geometry) {
+      const bs = chartData.base_setup
+      const geo = bs.geometry
+
+      if (bs.base_type === 'FLAT_BASE' && geo.start_date && geo.end_date) {
+        // Flat Base: draw two horizontal price lines (top/bottom of box)
+        // and a shaded area series between them
+        const topLine = mainChart.addLineSeries({
+          color: COLORS.baseFlatEdge,
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+        })
+        topLine.setData([
+          { time: geo.start_date, value: geo.base_high },
+          { time: geo.end_date,   value: geo.base_high },
+        ])
+
+        const bottomLine = mainChart.addLineSeries({
+          color: COLORS.baseFlatEdge,
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+        })
+        bottomLine.setData([
+          { time: geo.start_date, value: geo.base_low },
+          { time: geo.end_date,   value: geo.base_low },
+        ])
+
+        // Entry price line
+        if (bs.entry) {
+          candleSeries.createPriceLine({
+            price: bs.entry,
+            color: COLORS.go,
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: 'ENTRY',
+          })
+        }
+
+        // Add markers at the corners
+        candleSeries.setMarkers([
+          { time: geo.start_date, position: 'aboveBar', color: COLORS.baseFlatEdge, shape: 'square', text: 'FB' },
+        ])
+      }
+
+      if (bs.base_type === 'CUP_HANDLE' && geo.left_peak_date && geo.cup_bottom_date && geo.right_rim_date) {
+        // Cup & Handle: draw arc from left peak → cup bottom → right rim
+        // Approximate with line series through key points
+        const cupSeries = mainChart.addLineSeries({
+          color: COLORS.cupArc,
+          lineWidth: 2,
+          lineStyle: LineStyle.Solid,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+        })
+
+        // Build cup curve: left peak → bottom → right rim
+        // Use candle data to trace the actual lows through the cup region
+        const cupPoints = []
+        const candles = chartData.candles || []
+        let inCup = false
+        let pastCup = false
+        for (const c of candles) {
+          if (c.time === geo.left_peak_date) inCup = true
+          if (inCup && !pastCup) {
+            cupPoints.push({ time: c.time, value: c.low })
+          }
+          if (c.time === geo.right_rim_date) pastCup = true
+        }
+        if (cupPoints.length > 0) {
+          cupSeries.setData(cupPoints)
+        }
+
+        // Handle area: right rim → handle low
+        if (geo.handle_low && geo.handle_high) {
+          candleSeries.createPriceLine({
+            price: geo.handle_high,
+            color: COLORS.cupArc,
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: 'PIVOT',
+          })
+          candleSeries.createPriceLine({
+            price: geo.handle_low,
+            color: 'rgba(155, 110, 255, 0.3)',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dotted,
+            axisLabelVisible: false,
+            title: '',
+          })
+        }
+
+        // Markers
+        candleSeries.setMarkers([
+          { time: geo.left_peak_date,  position: 'aboveBar', color: COLORS.cupArc, shape: 'arrowDown', text: 'L' },
+          { time: geo.cup_bottom_date, position: 'belowBar', color: COLORS.cupArc, shape: 'arrowUp',   text: 'B' },
+          { time: geo.right_rim_date,  position: 'aboveBar', color: COLORS.cupArc, shape: 'arrowDown', text: 'R' },
+        ])
+
+        // Entry price line
+        if (bs.entry) {
+          candleSeries.createPriceLine({
+            price: bs.entry,
+            color: COLORS.go,
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: 'ENTRY',
+          })
+        }
+      }
     }
 
     // ── CCI line series ────────────────────────────────────────────────────
@@ -243,7 +394,9 @@ export default function TradingChart({ ticker, chartData, loading }) {
       const e8     = param.seriesData.get(ema8Series)
       const e20    = param.seriesData.get(ema20Series)
       const s50    = param.seriesData.get(sma50Series)
-      const tl     = trendlineSeries ? param.seriesData.get(trendlineSeries) : null
+      const s200   = param.seriesData.get(sma200Series)
+      const tlDesc = descTrendlineSeries ? param.seriesData.get(descTrendlineSeries) : null
+      const tlAsc  = ascTrendlineSeries  ? param.seriesData.get(ascTrendlineSeries)  : null
 
       setLegend({
         time:      param.time,
@@ -254,7 +407,9 @@ export default function TradingChart({ ticker, chartData, loading }) {
         ema8:      e8?.value,
         ema20:     e20?.value,
         sma50:     s50?.value,
-        trendline: tl?.value,
+        sma200:    s200?.value,
+        trendlineDesc: tlDesc?.value,
+        trendlineAsc:  tlAsc?.value,
       })
     })
 
@@ -314,54 +469,133 @@ export default function TradingChart({ ticker, chartData, loading }) {
   return (
     <div ref={wrapRef} className="flex flex-col h-full overflow-hidden">
 
-      {/* Chart info bar */}
-      <div className="flex items-center gap-4 px-3 py-1.5 border-b border-t-border flex-shrink-0"
-           style={{ background: 'var(--surface)' }}>
-        <span className="text-t-accent font-600 text-[13px] tracking-widest">{ticker}</span>
-        <span className="text-t-muted text-[9px] uppercase tracking-widest">Daily</span>
+      {/* Main price chart with floating overlay */}
+      <div className="flex-1 min-h-0 relative">
 
-        {/* Indicator legend labels */}
-        <div className="flex items-center gap-4 ml-2">
-          <LegendItem dot={COLORS.ema8}  label="EMA-8"  value={legend?.ema8}  />
-          <LegendItem dot={COLORS.ema20} label="EMA-20" value={legend?.ema20} />
-          <LegendItem dot={COLORS.sma50} label="SMA-50" value={legend?.sma50} dashed />
-          {chartData.trendline?.series?.length > 0 && (
-            <LegendItem dot={COLORS.trendline} label="TDL" value={legend?.trendline} />
+        {/* Floating TradingView-style legend overlay */}
+        <div style={{
+          position: 'absolute', top: 8, left: 10, zIndex: 10,
+          pointerEvents: 'none', userSelect: 'none',
+          display: 'flex', flexDirection: 'column', gap: 2,
+        }}>
+          {/* Row 1: Company name + market cap */}
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+            <span style={{ color: '#FFFFFF', fontSize: 13, fontWeight: 700, letterSpacing: '0.5px' }}>
+              {chartData.ticker_info?.name || ticker}
+            </span>
+            {chartData.ticker_info?.market_cap != null && (
+              <span style={{ color: COLORS.muted, fontSize: 10, fontFamily: '"IBM Plex Mono", monospace' }}>
+                {fmtCap(chartData.ticker_info.market_cap)}
+              </span>
+            )}
+          </div>
+
+          {/* Row 2: Ticker · Timeframe · Sector · Industry */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10 }}>
+            <span style={{ color: COLORS.accent, fontWeight: 600, letterSpacing: '1px' }}>{ticker}</span>
+            <span style={{ color: COLORS.border }}>·</span>
+            <span style={{ color: COLORS.muted, textTransform: 'uppercase', letterSpacing: '1px', fontSize: 9 }}>1D</span>
+            {chartData.ticker_info?.sector && (<>
+              <span style={{ color: COLORS.border }}>·</span>
+              <span style={{ color: COLORS.muted, fontSize: 9 }}>{chartData.ticker_info.sector}</span>
+            </>)}
+            {chartData.ticker_info?.industry && (<>
+              <span style={{ color: COLORS.border }}>·</span>
+              <span style={{ color: COLORS.muted, fontSize: 9 }}>{chartData.ticker_info.industry}</span>
+            </>)}
+          </div>
+
+          {/* Row 3: ATR + 200 SMA status */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 10, marginTop: 2 }}>
+            {chartData.ticker_info?.atr != null && (
+              <span style={{ color: COLORS.text, fontFamily: '"IBM Plex Mono", monospace' }}>
+                ATR(14)&nbsp;
+                <span style={{ color: '#FFFFFF', fontWeight: 600 }}>{chartData.ticker_info.atr.toFixed(2)}</span>
+                {chartData.ticker_info.atr_pct != null && (
+                  <span style={{ color: COLORS.muted, marginLeft: 4 }}>({chartData.ticker_info.atr_pct}%)</span>
+                )}
+              </span>
+            )}
+            {chartData.ticker_info?.above_200sma != null && (
+              <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{
+                  width: 6, height: 6, borderRadius: '50%',
+                  background: chartData.ticker_info.above_200sma ? COLORS.go : COLORS.halt,
+                  boxShadow: `0 0 4px ${chartData.ticker_info.above_200sma ? COLORS.go : COLORS.halt}`,
+                }} />
+                <span style={{ color: COLORS.muted, fontSize: 9, letterSpacing: '0.5px' }}>
+                  {chartData.ticker_info.above_200sma ? 'Above' : 'Below'} 200 SMA
+                </span>
+              </span>
+            )}
+            {chartData.base_setup && (
+              <span style={{
+                fontSize: 8, padding: '2px 6px', borderRadius: 3,
+                background: chartData.base_setup.base_type === 'CUP_HANDLE'
+                  ? 'rgba(155,110,255,0.15)' : 'rgba(0,200,122,0.12)',
+                color: chartData.base_setup.base_type === 'CUP_HANDLE'
+                  ? COLORS.cupArc : COLORS.baseFlatEdge,
+                border: `1px solid ${chartData.base_setup.base_type === 'CUP_HANDLE'
+                  ? 'rgba(155,110,255,0.3)' : 'rgba(0,200,122,0.3)'}`,
+                fontWeight: 700,
+              }}>
+                {chartData.base_setup.base_type === 'CUP_HANDLE' ? 'CUP & HANDLE' : 'FLAT BASE'}
+                {' '}Q{chartData.base_setup.quality_score}
+              </span>
+            )}
+          </div>
+
+          {/* Row 4: MA values (from crosshair) */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 9, marginTop: 1 }}>
+            <LegendItem dot={COLORS.ema8}  label="EMA 8"  value={legend?.ema8}  />
+            <LegendItem dot={COLORS.ema20} label="EMA 20" value={legend?.ema20} />
+            <LegendItem dot={COLORS.sma50} label="SMA 50" value={legend?.sma50} />
+            {chartData.sma200?.length > 0 && (
+              <LegendItem dot={COLORS.sma200} label="SMA 200" value={legend?.sma200} />
+            )}
+            {chartData.trendline?.descending?.series?.length > 0 && (
+              <LegendItem dot={COLORS.trendline} label="TDL-R" value={legend?.trendlineDesc} />
+            )}
+            {chartData.trendline?.ascending?.series?.length > 0 && (
+              <LegendItem dot={COLORS.trendlineAsc} label="TDL-S" value={legend?.trendlineAsc} />
+            )}
+          </div>
+
+          {/* Row 5: OHLC from crosshair */}
+          {legend?.open != null && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, fontFamily: '"IBM Plex Mono", monospace', marginTop: 1 }}>
+              <span style={{ color: COLORS.muted }}>O <span style={{ color: COLORS.text }}>{pf(legend.open)}</span></span>
+              <span style={{ color: COLORS.muted }}>H <span style={{ color: COLORS.go }}>{pf(legend.high)}</span></span>
+              <span style={{ color: COLORS.muted }}>L <span style={{ color: COLORS.halt }}>{pf(legend.low)}</span></span>
+              <span style={{ color: COLORS.muted }}>C <span style={{ color: legend.close >= legend.open ? COLORS.go : COLORS.halt, fontWeight: 600 }}>{pf(legend.close)}</span></span>
+            </div>
           )}
         </div>
 
-        {/* OHLC from crosshair */}
-        {legend?.open != null && (
-          <div className="flex items-center gap-3 ml-auto font-mono tabular-nums text-[10px]">
-            <span className="text-t-muted">O<span className="ml-1 text-t-text">{pf(legend.open)}</span></span>
-            <span className="text-t-muted">H<span className="ml-1 text-t-go">{pf(legend.high)}</span></span>
-            <span className="text-t-muted">L<span className="ml-1 text-t-halt">{pf(legend.low)}</span></span>
-            <span className="text-t-muted">C<span className={`ml-1 font-600 ${legend.close >= legend.open ? 'text-t-go' : 'text-t-halt'}`}>{pf(legend.close)}</span></span>
+        {/* S/R zone strip */}
+        {chartData.sr_zones?.length > 0 && (
+          <div style={{
+            position: 'absolute', bottom: 4, left: 10, zIndex: 10,
+            pointerEvents: 'none', display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            <span style={{ fontSize: 8, color: COLORS.muted, letterSpacing: '1px', textTransform: 'uppercase' }}>S/R</span>
+            {chartData.sr_zones.map((z, i) => (
+              <span key={i} style={{
+                fontSize: 9, fontFamily: '"IBM Plex Mono", monospace',
+                color: z.type === 'RESISTANCE' ? COLORS.halt : COLORS.go,
+              }}>
+                {z.type[0]}{z.level.toFixed(2)}
+              </span>
+            ))}
           </div>
         )}
+
+        <div
+          ref={mainRef}
+          className="chart-container"
+          style={{ width: '100%', height: '100%' }}
+        />
       </div>
-
-      {/* S/R zone legend */}
-      {chartData.sr_zones?.length > 0 && (
-        <div className="flex items-center gap-3 px-3 py-1 border-b border-t-border flex-shrink-0 overflow-x-auto"
-             style={{ background: 'var(--bg)' }}>
-          <span className="text-[9px] tracking-widest uppercase text-t-muted flex-shrink-0">S/R Zones:</span>
-          {chartData.sr_zones.map((z, i) => (
-            <span key={i}
-              className="text-[9px] font-mono tabular-nums flex-shrink-0 flex items-center gap-1"
-              style={{ color: z.type === 'RESISTANCE' ? COLORS.halt : COLORS.go }}>
-              <span className="opacity-60">{z.type[0]}</span>{z.level.toFixed(2)}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* Main price chart */}
-      <div
-        ref={mainRef}
-        className="flex-1 chart-container min-h-0"
-        style={{ minHeight: 0 }}
-      />
 
       {/* CCI sub-chart */}
       <div className="flex-shrink-0 border-t border-t-border" style={{ height: 160 }}>
@@ -381,25 +615,28 @@ export default function TradingChart({ ticker, chartData, loading }) {
 
 // ── Sub-components ─────────────────────────────────────────────────────────
 
-function LegendItem({ dot, label, value, dashed }) {
+function LegendItem({ dot, label, value }) {
   return (
-    <div className="flex items-center gap-1.5">
-      {dashed ? (
-        <svg width="14" height="6" className="flex-shrink-0">
-          <line x1="0" y1="3" x2="14" y2="3" stroke={dot} strokeWidth="1.5" strokeDasharray="4 2" />
-        </svg>
-      ) : (
-        <span className="inline-block w-2 h-0.5 rounded flex-shrink-0" style={{ background: dot }} />
-      )}
-      <span className="text-t-muted text-[9px] uppercase tracking-wide">{label}</span>
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+      <span style={{ width: 8, height: 2, borderRadius: 1, background: dot, flexShrink: 0 }} />
+      <span style={{ color: COLORS.muted, fontSize: 9, letterSpacing: '0.3px' }}>{label}</span>
       {value != null && (
-        <span className="font-mono text-[10px] tabular-nums" style={{ color: dot }}>
+        <span style={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: 10, color: dot }}>
           {value.toFixed(2)}
         </span>
       )}
-    </div>
+    </span>
   )
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const pf = (n) => n?.toFixed(2) ?? '—'
+
+/** Format market cap: 1.23T / 5.72B / 340M / 12.5M */
+const fmtCap = (n) => {
+  if (n == null) return '—'
+  if (n >= 1e12) return `${(n / 1e12).toFixed(2)}T`
+  if (n >= 1e9)  return `${(n / 1e9).toFixed(2)}B`
+  if (n >= 1e6)  return `${(n / 1e6).toFixed(1)}M`
+  return n.toLocaleString()
+}

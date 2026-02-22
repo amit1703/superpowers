@@ -583,8 +583,8 @@ def scan_vcp(
                 # Take the zone with the highest level (most recently broken)
                 candidate = max(broken, key=lambda z: z["level"])
                 pct_above_upper = (lc - candidate["upper"]) / candidate["upper"]
-                # Price must be 0.5 % – 3 % above the zone's upper edge
-                if 0.005 <= pct_above_upper <= 0.03:
+                # Price must be 0.3 % – 3 % above the zone's upper edge (reject stale breakouts)
+                if 0.003 <= pct_above_upper <= 0.03:
                     confirmed_breakout = True
                     bk_zone = candidate
 
@@ -634,16 +634,20 @@ def scan_vcp(
         is_trendline_breakout = False
         trendline_data = None
 
-        if trendline_result is not None and trendline_result.get("series"):
-            tl_today = trendline_result["series"][-1]["value"]
-            # Breakout: close above trendline + vol surge ≥120% + trend filter (already checked)
-            if lc > tl_today and lvol >= 1.2 * avg_vol:
-                is_trendline_breakout = True
-                trendline_data = trendline_result
+        desc_tl = trendline_result.get("descending") if trendline_result else None
+        if desc_tl is not None and desc_tl.get("series"):
+            tl_today = desc_tl["series"][-1]["value"]
+            # Breakout: close above descending trendline + vol surge ≥120% + trend filter (already checked)
+            # Cap: price must be within 0-2% above the line (reject stale/extended breakouts)
+            if tl_today > 0:
+                pct_above_tl = (lc - tl_today) / tl_today
+                if 0 < pct_above_tl <= 0.02 and lvol >= 1.2 * avg_vol:
+                    is_trendline_breakout = True
+                    trendline_data = trendline_result
 
         if is_trendline_breakout and trendline_data is not None:
             entry      = round(lh * 1.001, 2)
-            stop_base  = min(ll, 0.98 * trendline_data["series"][-1]["value"])
+            stop_base  = min(ll, 0.98 * desc_tl["series"][-1]["value"])
             stop_loss  = round(stop_base - 0.2 * latr, 2)
             risk       = entry - stop_loss
             if risk > 0 and risk <= entry * 0.15:
@@ -678,18 +682,20 @@ def scan_vcp(
                 }
 
         # ── PATH D — KDE Horizontal Breakout ─────────────────────────────────
-        # Simple breakout: price above resistance zone with volume + RS gate
-        # Only checked if no earlier paths matched
+        # Breakout above the NEAREST resistance zone above current price
+        # (not highest — distant levels are irrelevant for breakout detection)
 
-        highest_res = None
-        highest_level = 0.0
+        nearest_res_above = None
+        nearest_dist = float("inf")
         for z in resistance_zones:
-            if z["level"] > highest_level:
-                highest_level = z["level"]
-                highest_res = z
+            dist = z["level"] - lc
+            # Zone must be near current price (within 5% above) to be relevant
+            if -0.02 * lc <= dist <= 0.05 * lc and abs(dist) < nearest_dist:
+                nearest_dist = abs(dist)
+                nearest_res_above = z
 
-        if highest_res is not None:
-            upper = highest_res["upper"]
+        if nearest_res_above is not None:
+            upper = nearest_res_above["upper"]
             pct_above_upper = (lc - upper) / upper if upper > 0 else 0.0
 
             # Check: 0.1% to 2.5% above resistance + volume ≥115% + RS ≥0
@@ -701,7 +707,7 @@ def scan_vcp(
 
             if is_kde_breakout:
                 entry      = round(lh * 1.001, 2)
-                stop_base  = min(ll, highest_res["lower"])
+                stop_base  = min(ll, nearest_res_above["lower"])
                 stop_loss  = round(stop_base - 0.2 * latr, 2)
                 risk       = entry - stop_loss
 
@@ -718,7 +724,7 @@ def scan_vcp(
                         "is_breakout":        True,
                         "is_vol_surge":       lvol >= 1.5 * avg_vol,
                         "volume_ratio":       volume_ratio,
-                        "resistance_level":   highest_res["level"],
+                        "resistance_level":   nearest_res_above["level"],
                         "breakout_pct":       round(pct_above_upper * 100, 2),
                         "rs_vs_spy":          rs_vs_spy,
                         "tr_contraction_pct": round((1 - (tr.iloc[-5:].mean() / tr.iloc[-25:-5].mean())) * 100, 1) if len(tr) >= 25 else None,
@@ -738,10 +744,10 @@ def scan_vcp(
 
         # ── PATH E — RS Strength Breakout ────────────────────────────────────
         # Institutional accumulation signal: RS Blue Dot + proximity to resistance
-        # Less strict than VCP/DRY, focuses on early institutional moves
+        # Uses nearest resistance above price (not highest distant level)
 
-        if highest_res is not None and rs_blue_dot:
-            upper = highest_res["upper"]
+        if nearest_res_above is not None and rs_blue_dot:
+            upper = nearest_res_above["upper"]
             pct_below_upper = (upper - lc) / upper if upper > 0 else 1.0
 
             # Check: within 3% below resistance + RS Blue Dot (no volume requirement)
@@ -754,7 +760,7 @@ def scan_vcp(
 
             if is_rs_lead:
                 entry      = round(lh * 1.001, 2)
-                stop_base  = min(ll, highest_res["lower"])
+                stop_base  = min(ll, nearest_res_above["lower"])
                 stop_loss  = round(stop_base - 0.2 * latr, 2)
                 risk       = entry - stop_loss
 
@@ -771,7 +777,7 @@ def scan_vcp(
                         "is_breakout":        True,
                         "is_vol_surge":       False,
                         "volume_ratio":       volume_ratio,
-                        "resistance_level":   highest_res["level"],
+                        "resistance_level":   nearest_res_above["level"],
                         "breakout_pct":       round(pct_below_upper * 100, 2),
                         "rs_vs_spy":          rs_vs_spy,
                         "tr_contraction_pct": round((1 - (tr.iloc[-5:].mean() / tr.iloc[-25:-5].mean())) * 100, 1) if len(tr) >= 25 else None,
@@ -792,7 +798,7 @@ def scan_vcp(
         # ── PATH A — DRY (Coiled Spring) ──────────────────────────────────
 
         # ── A2. True Range contraction ────────────────────────────────────
-        tr = _tr(high, low, close).dropna()
+        # (tr already computed above for contraction counting)
         if len(tr) < 26:
             return None
 

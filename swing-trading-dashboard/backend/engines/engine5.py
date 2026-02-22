@@ -7,14 +7,14 @@ PATTERN A — Cup & Handle (C&H):
   1. Cup     : U-shaped consolidation, 12–35% depth, 30–120 bars
   2. Right rim: recovers to within 10% of left peak
   3. Handle  : 5–25 day pullback 5–15%, volume contracting
-  4. Signal  : DRY (within 1.5% of handle high) or BRK (above, vol ≥ 120%)
+  4. Signal  : DRY (within 1.0% of handle high) or BRK (above, vol ≥ 120%)
 
 PATTERN B — Flat Base (FLAT):
   1. Duration: ≥ 25 trading days
-  2. Depth   : ≤ 15% from high to low of range
+  2. Depth   : ≤ 12% from high to low of range
   3. Location: Close in upper 75% of range
-  4. Volume  : 10-day avg ≤ 85% of 50-day avg
-  5. Signal  : DRY (within 1.5% of base high) or BRK (above, vol ≥ 120%)
+  4. Volume  : 10-day avg ≤ 75% of 50-day avg
+  5. Signal  : DRY (within 1.0% of base high) or BRK (above, vol ≥ 120%)
 
 Quality Score (0–100):
   25 pts: RS vs SPY (3-month outperformance)
@@ -51,7 +51,7 @@ def scan_base_pattern(
     """Main entry point. Returns the highest-quality base setup found, or None."""
     ch = scan_cup_handle(ticker, df, spy_3m_return, rs_ratio, rs_52w_high, rs_blue_dot)
     fb = scan_flat_base(ticker, df, spy_3m_return, rs_ratio, rs_52w_high, rs_blue_dot)
-    candidates = [s for s in [ch, fb] if s is not None]
+    candidates = [s for s in [ch, fb] if s is not None and s.get("quality_score", 0) >= 25]
     if not candidates:
         return None
     return max(candidates, key=lambda s: s.get("quality_score", 0))
@@ -79,6 +79,36 @@ def scan_cup_handle(
 
         if close_s.dropna().shape[0] < 55:
             return None
+
+        # ── Trend filter: price must be above 200 SMA and 50 SMA ────────
+        sma200 = close_s.rolling(200).mean()
+        sma50 = close_s.rolling(50).mean()
+        lc_val = close_s.iloc[-1]
+        lc_raw = float(lc_val.item() if hasattr(lc_val, 'item') else lc_val)
+        l200_val = sma200.iloc[-1]
+        l50_val = sma50.iloc[-1]
+        l200 = float(l200_val.item() if hasattr(l200_val, 'item') else l200_val) if pd.notna(l200_val) else 0.0
+        l50 = float(l50_val.item() if hasattr(l50_val, 'item') else l50_val) if pd.notna(l50_val) else 0.0
+        if l200 > 0 and lc_raw < l200:
+            return None
+        if l50 > 0 and lc_raw < l50:
+            return None
+
+        # ── Stage 2 confirmation: prior advance + rising 200 SMA ───────
+        # Stock must be >= 30% above its 52-week low (proves prior advance)
+        if len(low_s) >= 252:
+            yr_low = float(low_s.iloc[-252:].min())
+        else:
+            yr_low = float(low_s.min())
+        if yr_low > 0 and lc_raw < yr_low * 1.30:
+            return None
+
+        # 200 SMA must be rising (today > 20 bars ago)
+        if l200 > 0 and len(sma200) >= 21:
+            l200_prev_val = sma200.iloc[-21]
+            l200_prev = float(l200_prev_val.item() if hasattr(l200_prev_val, 'item') else l200_prev_val) if pd.notna(l200_prev_val) else 0.0
+            if l200_prev > 0 and l200 <= l200_prev:
+                return None
 
         close = close_s.values.astype(float)
         volume = volume_s.values.astype(float)
@@ -125,7 +155,7 @@ def scan_cup_handle(
 
         if lc > handle_high and vol_ratio >= 1.2:
             signal = "BRK"
-        elif dist_to_pivot <= 0.015:
+        elif dist_to_pivot <= 0.010:
             signal = "DRY"
         else:
             return None
@@ -138,11 +168,13 @@ def scan_cup_handle(
             return None
         take_profit = round(entry + 2.0 * risk, 2)
 
+        # Volume contraction: 5-day avg must be <= 85% of 50-day avg
+        vol_dry_pct = float(np.mean(volume[-5:])) / vol_sma50 if vol_sma50 > 0 else 1.0
+        if vol_dry_pct > 0.85:
+            return None
+
         # RS vs SPY
         rs_vs_spy = (rs_ratio - spy_3m_return) if spy_3m_return != 0 else 0.0
-
-        # Volume dry-up: 5-day avg vs 50-day avg
-        vol_dry_pct = float(np.mean(volume[-5:])) / vol_sma50 if vol_sma50 > 0 else 1.0
 
         qs = _quality_score(
             depth_pct=cup["depth"],
@@ -154,6 +186,11 @@ def scan_cup_handle(
 
         offset = len(close) - lookback
         base_length = (len(close) - 1) - (offset + cup["left_peak_idx"])
+
+        # Geometry for chart overlay (convert bar indices to dates)
+        left_peak_abs = offset + cup["left_peak_idx"]
+        cup_bottom_abs = offset + cup["cup_bottom_idx"]
+        right_rim_abs = offset + cup["right_rim_idx"]
 
         return {
             "ticker": ticker,
@@ -170,6 +207,17 @@ def scan_cup_handle(
             "volume_dry_pct": round(vol_dry_pct * 100, 1),
             "rs_vs_spy": round(rs_vs_spy * 100, 2),
             "setup_date": str(data.index[-1].date()),
+            # Geometry for chart overlay
+            "geometry": {
+                "left_peak_date": str(data.index[left_peak_abs].date()) if left_peak_abs < len(data) else None,
+                "left_peak_price": round(cup["left_peak"], 2),
+                "cup_bottom_date": str(data.index[cup_bottom_abs].date()) if cup_bottom_abs < len(data) else None,
+                "cup_bottom_price": round(cup["cup_bottom"], 2),
+                "right_rim_date": str(data.index[right_rim_abs].date()) if right_rim_abs < len(data) else None,
+                "right_rim_price": round(cup["right_rim"], 2),
+                "handle_high": round(handle["handle_high"], 2),
+                "handle_low": round(handle["handle_low"], 2),
+            },
         }
 
     except Exception as exc:
@@ -200,30 +248,72 @@ def scan_flat_base(
         if close_s.dropna().shape[0] < 55:
             return None
 
-        # Look at last 25–60 days
-        lookback = min(60, len(close_s))
+        # ── Trend filter: price must be above 200 SMA and 50 SMA ────────
+        sma200 = close_s.rolling(200).mean()
+        sma50 = close_s.rolling(50).mean()
+        lc_val = close_s.iloc[-1]
+        lc = float(lc_val.item() if hasattr(lc_val, 'item') else lc_val)
+        l200_val = sma200.iloc[-1]
+        l50_val = sma50.iloc[-1]
+        l200 = float(l200_val.item() if hasattr(l200_val, 'item') else l200_val) if pd.notna(l200_val) else 0.0
+        l50 = float(l50_val.item() if hasattr(l50_val, 'item') else l50_val) if pd.notna(l50_val) else 0.0
+        if l200 > 0 and lc < l200:
+            return None
+        if l50 > 0 and lc < l50:
+            return None
+
+        # ── Stage 2 confirmation: prior advance + rising 200 SMA ───────
+        if len(low_s) >= 252:
+            yr_low = float(low_s.iloc[-252:].min())
+        else:
+            yr_low = float(low_s.min())
+        if yr_low > 0 and lc < yr_low * 1.30:
+            return None
+
+        if l200 > 0 and len(sma200) >= 21:
+            l200_prev_val = sma200.iloc[-21]
+            l200_prev = float(l200_prev_val.item() if hasattr(l200_prev_val, 'item') else l200_prev_val) if pd.notna(l200_prev_val) else 0.0
+            if l200_prev > 0 and l200 <= l200_prev:
+                return None
+
+        # ── Dynamic lookback: find where the flat base starts ────────────
+        # Scan backward from 60 days to find the longest window where
+        # high-to-low depth stays <= 12%. Minimum 25 days.
+        max_lookback = min(60, len(close_s))
+        lookback = 0
+        for lb in range(max_lookback, 24, -1):
+            window_high = float(high_s.iloc[-lb:].max())
+            window_low = float(low_s.iloc[-lb:].min())
+            if window_high > 0:
+                window_depth = (window_high - window_low) / window_high
+                if window_depth <= 0.12:
+                    lookback = lb
+                    break
         if lookback < 25:
             return None
 
-        base_close = close_s.iloc[-lookback:]
-        base_high = float(base_close.max())
+        # ── Depth: use actual High/Low for true range depth ──────────────
+        base_high_price = float(high_s.iloc[-lookback:].max())
         base_low_price = float(low_s.iloc[-lookback:].min())
-
-        # Depth: (high - low) / high <= 15%
-        depth = (base_high - float(base_close.min())) / base_high
-        if depth > 0.15:
+        if base_high_price <= 0:
             return None
 
-        # Current close in upper 75% of range
-        lc_val = close_s.iloc[-1]
-        lc = float(lc_val.item() if hasattr(lc_val, 'item') else lc_val)
-        range_span = base_high - float(base_close.min())
+        depth = (base_high_price - base_low_price) / base_high_price
+        if depth > 0.12:
+            return None
+
+        # For breakout pivot, use the highest close (not intraday high)
+        base_close = close_s.iloc[-lookback:]
+        base_high = float(base_close.max())
+
+        # Current close in upper 25% of range (near top of base)
+        range_span = base_high_price - base_low_price
         if range_span > 0:
-            pct_in_range = (lc - float(base_close.min())) / range_span
-            if pct_in_range < 0.25:
+            pct_in_range = (lc - base_low_price) / range_span
+            if pct_in_range < 0.75:
                 return None
 
-        # Volume contraction: 10-day avg <= 85% of 50-day avg
+        # Volume contraction: 10-day avg <= 75% of 50-day avg
         vol_sma50_s = volume_s.rolling(50).mean()
         vol_sma10_s = volume_s.rolling(10).mean()
         vsm50_val = vol_sma50_s.iloc[-1]
@@ -235,7 +325,7 @@ def scan_flat_base(
             return None
 
         vol_ratio_10_50 = vsm10 / vsm50
-        if vol_ratio_10_50 > 0.85:
+        if vol_ratio_10_50 > 0.75:
             return None
 
         # ATR
@@ -255,7 +345,7 @@ def scan_flat_base(
 
         if lc > base_high and vol_ratio >= 1.2:
             signal = "BRK"
-        elif dist_to_pivot <= 0.015:
+        elif dist_to_pivot <= 0.010:
             signal = "DRY"
         else:
             return None
@@ -272,11 +362,14 @@ def scan_flat_base(
 
         qs = _quality_score(
             depth_pct=depth,
-            max_depth_pct=0.15,
+            max_depth_pct=0.12,
             vol_dry_pct=vol_ratio_10_50,
             rs_vs_spy=rs_vs_spy,
             rs_blue_dot=rs_blue_dot,
         )
+
+        # Geometry for chart overlay
+        base_start_idx = len(data) - lookback
 
         return {
             "ticker": ticker,
@@ -293,6 +386,13 @@ def scan_flat_base(
             "volume_dry_pct": round(vol_ratio_10_50 * 100, 1),
             "rs_vs_spy": round(rs_vs_spy * 100, 2),
             "setup_date": str(data.index[-1].date()),
+            # Geometry for chart overlay (uses actual high/low for bounding box)
+            "geometry": {
+                "start_date": str(data.index[base_start_idx].date()),
+                "end_date": str(data.index[-1].date()),
+                "base_high": round(base_high_price, 2),
+                "base_low": round(base_low_price, 2),
+            },
         }
 
     except Exception as exc:
@@ -409,9 +509,9 @@ def _find_handle(
     handle_low = float(search[handle_low_rel])
     handle_length = len(search)
 
-    # Pullback: 5–15% from rim
+    # Pullback: 3–15% from rim (strong stocks form shallow 3-5% handles)
     pullback = (right_rim - handle_low) / right_rim
-    if pullback < 0.05 or pullback > 0.15:
+    if pullback < 0.03 or pullback > 0.15:
         return None
 
     # Handle low must not undercut cup midpoint

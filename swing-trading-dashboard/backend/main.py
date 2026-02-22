@@ -40,7 +40,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from indicators import ema as _ema, sma as _sma, cci as _cci
+from indicators import ema as _ema, sma as _sma, cci as _cci, atr as _atr
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -184,18 +184,14 @@ async def _fetch(ticker: str, retry_count: int = 0) -> Optional[pd.DataFrame]:
         async with _semaphore:
             loop = asyncio.get_event_loop()
             try:
-                df = await loop.run_in_executor(
-                    None,
-                    lambda: yf.download(
-                        ticker,
+                def _do_download(t=ticker):
+                    """Bind ticker via default arg; use Ticker().history() for thread-safe isolation."""
+                    return yf.Ticker(t).history(
                         period=DATA_FETCH_PERIOD,
                         interval="1d",
                         auto_adjust=False,
-                        prepost=False,
-                        progress=False,
-                        threads=False,
-                    ),
-                )
+                    )
+                df = await loop.run_in_executor(None, _do_download)
 
                 if df is None or df.empty:
                     if attempt < FETCH_MAX_RETRIES:
@@ -786,15 +782,65 @@ async def get_chart_data(ticker: str):
     except Exception as exc:
         log.warning("Trendline detection failed %s: %s", sym, exc)
 
+    # Fetch latest base setup for this ticker (for chart overlay)
+    base_setup = None
+    try:
+        all_base = await get_latest_setups(DB_PATH, setup_type="BASE")
+        for s in all_base:
+            if s.get("ticker") == sym and s.get("geometry"):
+                base_setup = {
+                    "base_type": s.get("base_type"),
+                    "geometry": s["geometry"],
+                    "entry": s.get("entry"),
+                    "stop_loss": s.get("stop_loss"),
+                    "signal": s.get("signal"),
+                    "quality_score": s.get("quality_score"),
+                }
+                break
+    except Exception as exc:
+        log.warning("Base setup lookup failed for %s: %s", sym, exc)
+
+    # SMA 200 for chart display
+    sma200 = _sma(close_adj, 200)
+
+    # ATR (14-period) for chart metadata
+    atr14 = _atr(high, low, close_adj, 14)
+    last_atr = float(atr14.iloc[-1]) if pd.notna(atr14.iloc[-1]) else None
+    last_close = float(close_adj.iloc[-1]) if pd.notna(close_adj.iloc[-1]) else None
+    atr_pct = round(last_atr / last_close * 100, 2) if last_atr and last_close else None
+
+    # Above 200 SMA?
+    last_sma200 = float(sma200.iloc[-1]) if pd.notna(sma200.iloc[-1]) else None
+    above_200sma = (last_close > last_sma200) if last_close and last_sma200 else None
+
+    # Ticker metadata from yfinance info (name, sector, industry, market cap)
+    ticker_info = {
+        "name": None, "sector": None, "industry": None,
+        "market_cap": None, "atr": round(last_atr, 2) if last_atr else None,
+        "atr_pct": atr_pct, "above_200sma": above_200sma,
+    }
+    try:
+        loop = asyncio.get_event_loop()
+        info = await loop.run_in_executor(None, lambda: yf.Ticker(sym).info)
+        ticker_info["name"] = info.get("shortName") or info.get("longName")
+        ticker_info["sector"] = info.get("sector")
+        ticker_info["industry"] = info.get("industry")
+        ticker_info["market_cap"] = info.get("marketCap")
+    except Exception as exc:
+        log.warning("Could not fetch info for %s: %s", sym, exc)
+
     return {
         "ticker": sym,
         "candles": candles,
         "ema8": _series(df.index, ema8),
         "ema20": _series(df.index, ema20),
         "sma50": _series(df.index, sma50),
+        "sma200": _series(df.index, sma200),
         "cci": _series(df.index, cci20, dec=1),
         "sr_zones": zones,
         "trendline": trendline,
+        "base_setup": base_setup,
+        "ticker_info": ticker_info,
     }
 
 

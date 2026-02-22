@@ -61,7 +61,7 @@ MIN_RISK_REWARD_RATIO = 1.0  # Minimum acceptable R:R ratio for setups
 # Data Processing
 # ──────────────────────────────────────────────────────────────────────────
 
-DATA_FETCH_PERIOD = "1y"  # Historical data lookback for each ticker
+DATA_FETCH_PERIOD = "2y"  # Historical data lookback for each ticker (2y for S/R and SMA200 coverage)
 CONCURRENCY_LIMIT = 15  # Max concurrent yfinance API requests (lowered for stability)
 BATCH_SAVE_SIZE = 100  # Batch size for database operations (if needed)
 FETCH_MAX_RETRIES = 3  # Maximum retry attempts for data fetches
@@ -71,7 +71,7 @@ FETCH_BACKOFF_BASE = 1.0  # Base delay for exponential backoff (seconds)
 # Scan Settings
 # ──────────────────────────────────────────────────────────────────────────
 
-MAX_TICKERS_PER_SCAN = 1000  # Safety limit on ticker universe size
+MAX_TICKERS_PER_SCAN = 2000  # Safety limit on ticker universe size
 SCAN_TIMEOUT_SECONDS = 600  # Maximum scan duration (10 minutes)
 
 # ──────────────────────────────────────────────────────────────────────────
